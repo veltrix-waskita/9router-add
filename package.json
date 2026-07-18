@@ -1,0 +1,19 @@
+{
+  "name": "9router-add",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^25.3.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "sqlite3": "^6.0.1",
+    "imapflow": "^1.4.7"
+  },
+  "devDependencies": {}
+}
