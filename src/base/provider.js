@@ -13,6 +13,12 @@ const { AuthError, QuotaError, ProviderError } = require("./errors");
  * The `add()` method is wrapped at construction time with the
  * beforeAdd / afterAdd / onError lifecycle so that subclass overrides
  * are captured by the wrapper.
+ *
+ * WARNING: Subclass overrides of `add()` MUST NOT call `super.add(...)` —
+ * the lifecycle wrapper is installed on the instance at construction time,
+ * and `super.add` resolves directly to `BaseProvider.prototype.add`,
+ * bypassing the wrapper entirely. Use the `beforeAdd` / `afterAdd`
+ * hooks if pre- or post-processing is needed.
  */
 class BaseProvider {
   /**
