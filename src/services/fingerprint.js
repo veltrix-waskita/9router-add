@@ -1,20 +1,20 @@
 "use strict";
 
 // Browser fingerprint randomization — generate realistic-looking per-account
-// profile. Tujuannya: bypass AWS per-fingerprint throttle yang gak ke-fix
-// dengan proxy rotation (proxy = IP baru, fingerprint tetap = throttle lanjut).
+// profile. Purpose: bypass AWS per-fingerprint throttle that proxy rotation
+// alone does not fix (proxy = new IP, but fingerprint stays the same = continued throttle).
 //
-// Komponen yang di-randomize:
+// Randomized components:
 //   - User-Agent (Chrome desktop, Windows/Mac/Linux)
 //   - Viewport (realistic desktop sizes)
 //   - Timezone (IANA, common zones)
-//   - Locale (en-US, en-GB, de-DE, dll)
+//   - Locale (en-US, en-GB, de-DE, etc.)
 //   - Accept-Language (derived from locale)
 //   - Hardware concurrency + device memory
 //   - navigator.languages
 //
-// Sumber: real-world browser distribution. Range realistic supaya AWS
-// fingerprint API gak flag sebagai obviously bot.
+// Source: real-world browser distribution. Ranges are realistic so the AWS
+// fingerprint API does not flag them as obviously bot-generated.
 
 const UAs = [
   // Chrome 149 (current) — Windows
@@ -69,13 +69,13 @@ const TIMEZONES = [
 const HARDWARE_CONCURRENCY = [2, 4, 8, 12, 16];
 const DEVICE_MEMORY = [2, 4, 8, 16, 32];
 
-// Pick random element dari array.
+// Pick a random element from an array.
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-// Generate full fingerprint. `seed` optional — kalau diisi, return
-// deterministik (untuk tests). Kalau gak, pakai Math.random.
+// Generate a full fingerprint. `seed` is optional — when provided, returns a
+// deterministic result (for tests). Otherwise uses Math.random.
 /**
  * Generate a randomized browser fingerprint. Deterministic when seed provided.
  * @param {number} [seed]

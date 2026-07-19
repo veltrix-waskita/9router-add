@@ -1,35 +1,35 @@
 "use strict";
 
-// Cloudflare Email Routing helpers — generate aliases di domain yang user
-// kontrol (e.g. minom.my.id). Semua alias auto-forward ke Gmail tujuan
-// via catch-all rule yang diset 1x di Cloudflare dashboard.
+// Cloudflare Email Routing helpers — generate aliases on a domain the user
+// controls (e.g. minom.my.id). All aliases auto-forward to the destination
+// Gmail via a catch-all rule configured once in the Cloudflare dashboard.
 //
-// Kenapa CF Email Routing > third-party forwarder:
-// - Domain milik user → AWS tidak akan pernah blocklist (tidak ada signal
-//   disposable-email yang bisa di-push ke AWS blocklist).
-// - Unlimited aliases, free tier CF cukup (200+ dest, unlimited rules).
-// - Tidak perlu signup / API ke provider lain.
+// Why CF Email Routing > third-party forwarder:
+// - User-owned domain → AWS will never blocklist it (no disposable-email
+//   signal that can be pushed to the AWS blocklist).
+// - Unlimited aliases; CF free tier is sufficient (200+ destinations, unlimited rules).
+// - No signup / API to any other provider.
 //
-// Prasyarat (1x setup, di Cloudflare dashboard):
-// 1. Domain minom.my.id sudah ada di Cloudflare DNS.
-// 2. Buka Email > Email Routing > Enable. Set destination address
-//    (Gmail tujuan) dan klik link verifikasi.
-// 3. Tambah catch-all rule: "Catch all addresses that route to my destination".
-// 4. Setelah setup, semua *@minom.my.id akan di-forward ke Gmail tujuan.
+// Prerequisites (one-time setup, in the Cloudflare dashboard):
+// 1. Domain minom.my.id must already be on Cloudflare DNS.
+// 2. Open Email > Email Routing > Enable. Set the destination address
+//    (target Gmail) and click the verification link.
+// 3. Add a catch-all rule: "Catch all addresses that route to my destination".
+// 4. After setup, all *@minom.my.id will be forwarded to the target Gmail.
 //
-// Module ini generate random local-part + append ke aliases.txt. Bot IMAP
-// cukup membaca Gmail — tidak ada API call ke CF di hot path.
+// This module generates a random local-part and appends it to aliases.txt.
+// The IMAP bot just reads Gmail — no API call to CF on the hot path.
 
 const fs = require("fs");
 const path = require("path");
 
-// Local-part generator — menghasilkan alias yang terlihat seperti nama
-// manusia sungguhan (mis. "emma.walker37" bukan "5w0kuqx05p"). Pola: kata
-// dari dict (nama depan) + kata keluarga + angka 1-99. Lebih terlihat
-// natural untuk AWS fingerprint (which counts alias-like email addresses
-// as "looks like real user" signal).
+// Local-part generator — produces aliases that look like real human names
+// (e.g. "emma.walker37" instead of "5w0kuqx05p"). Pattern: dictionary word
+// (first name) + surname + 1–99 digit. Looks more natural to the AWS
+// fingerprint heuristic (which treats alias-like email addresses as a
+// "looks like real user" signal).
 //
-// `len` diabaikan (dipertahankan untuk backward-compat dengan CLI signature).
+// `len` is ignored (kept for backward-compat with the CLI signature).
 const FIRST_WORDS = [
   "emma", "liam", "olivia", "noah", "ava", "sophia", "mason", "isabella",
   "lucas", "mia", "logan", "harper", "ethan", "amelia", "james", "ella",
@@ -54,14 +54,14 @@ function randomLocalPart() {
   const first = FIRST_WORDS[Math.floor(Math.random() * FIRST_WORDS.length)];
   const last = LAST_WORDS[Math.floor(Math.random() * LAST_WORDS.length)];
   const num = Math.floor(Math.random() * 90) + 10; // 10-99
-  // 2 format yang dipakai keduanya: "emma.walker37" dan "emmaw37" — dipilih
-  // random supaya gak semua alias punya struktur sama.
+  // Two formats are both used: "emma.walker37" and "emmaw37" — picked
+  // randomly so not every alias shares the same structure.
   if (Math.random() < 0.5) return `${first}.${last}${num}`;
   return `${first.slice(0, 4)}${last.slice(0, 2)}${num}`;
 }
 
-// Generate N random aliases di domain. Local-part pakai format
-// name-like (lihat randomLocalPart).
+// Generate N random aliases on a domain. Local-part uses the name-like format
+// (see randomLocalPart).
 /** @param {string} domain @param {number} [count=1] @returns {Array<string>} */
 function generateAliases(domain, count = 1) {
   const out = [];
@@ -71,8 +71,8 @@ function generateAliases(domain, count = 1) {
   return out;
 }
 
-// Append aliases ke file (gitignored). Dedupe otomatis (existing entries
-// ignored). Return jumlah alias yang sebenarnya baru ditambah.
+// Append aliases to a file (gitignored). Automatic dedupe (existing entries
+// are ignored). Returns the number of aliases that were actually added.
 /** @param {string} filePath @param {Array<string>} aliases @returns {number} */
 function appendAliasesToFile(filePath, aliases) {
   let existing = "";

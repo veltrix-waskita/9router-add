@@ -1,21 +1,21 @@
 "use strict";
 
 // Proxy rotation helpers — cycle per account index.
-// Sumber: file (proxies.txt, gitignored) atau opsional API rotator.
+// Source: file (proxies.txt, gitignored) or optional API rotator.
 // Scope: Puppeteer launch (AWS Builder ID). 9router API direct.
 //
-// Format baris di proxies.txt (one per line):
-//   protocol://user:pass@host:port     (auth pakai puppeteer args + page.authenticate)
+// Line formats in proxies.txt (one per line):
+//   protocol://user:pass@host:port     (auth uses puppeteer args + page.authenticate)
 //   host:port:user:pass                 (legacy 4-field colon)
-//   host:port                           (tanpa auth)
-//   user:pass@host:port                 (default http)
+//   host:port                           (no auth)
+//   user:pass@host:port                 (defaults to http)
 //
-// Lines kosong / `#` di-skip. Parse error per-line di-treat sebagai warning
-// dan di-skip — gak menggugurkan seluruh load.
+// Empty lines / `#` are skipped. Per-line parse errors are treated as warnings
+// and skipped — they do not abort the entire load.
 
 const fs = require("fs");
 
-// Parse satu baris. Return null kalau invalid.
+// Parse a single line. Returns null if invalid.
 /** @param {string} line */
 function parseProxyLine(line) {
   const trimmed = String(line || "").trim();
@@ -63,9 +63,9 @@ function parseProxyLine(line) {
   return null;
 }
 
-// Load proxies dari file (gitignored). Returns array of parsed proxies.
-// Invalid lines log warning tapi gak throw — biar satu baris rusak gak
-// gagalkan seluruh load.
+// Load proxies from file (gitignored). Returns array of parsed proxies.
+// Invalid lines log a warning but do not throw — so one broken line does not
+// fail the entire load.
 /** @param {string} filePath */
 function loadProxies(filePath) {
   if (!filePath || !fs.existsSync(filePath)) return [];
@@ -82,16 +82,16 @@ function loadProxies(filePath) {
   return out;
 }
 
-// Return proxy untuk account index (cycle). Return null kalau pool kosong.
+// Return proxy for account index (cycle). Returns null if pool is empty.
 /** @param {Array<object>} proxies @param {number} accountIndex */
 function getProxyForAccount(proxies, accountIndex) {
   if (!Array.isArray(proxies) || proxies.length === 0) return null;
   return proxies[((accountIndex % proxies.length) + proxies.length) % proxies.length];
 }
 
-// Build Chromium launch args untuk proxy. Tanpa auth di args (username/password
-// dipasang via page.authenticate setelah launch — Puppeteer tidak support
-// authenticated proxy di args dengan semua build).
+// Build Chromium launch args for proxy. No auth in args (username/password
+// is attached via page.authenticate after launch — Puppeteer does not support
+// authenticated proxies in args across all builds).
 /** @param {{protocol: string, host: string, port: number}|null} proxy */
 function chromiumArgsForProxy(proxy) {
   if (!proxy) return [];

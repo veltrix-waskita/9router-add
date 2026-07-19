@@ -2,10 +2,10 @@
 
 // Per-UTC-day quota tracker — count registrations per email domain.
 //
-// Tujuan: AWS Builder ID rate-limit (ERR-837) triggered per IP+fingerprint.
-// Bekerja dengan membatasi akun per domain per hari UTC. Counter dipersist ke
-// .batch-stats.json (gitignored) supaya batch lanjut besok pakai sisa quota
-// otomatis.
+// Purpose: AWS Builder ID rate-limit (ERR-837) is triggered per IP+fingerprint.
+// We work around it by capping accounts per domain per UTC day. Counter is
+// persisted to .batch-stats.json (gitignored) so a batch resumed the next day
+// automatically picks up the remaining quota.
 //
 // Schema:
 //   {
@@ -32,9 +32,9 @@ function domainOf(email) {
   return email.slice(at + 1).toLowerCase();
 }
 
-// Load .batch-stats.json. Return {} kalau file gak ada / corrupt.
-// Corrupt JSON di-treat sebagai kosong (warning) — biar batch tidak
-// terblokir karena file rusak.
+// Load .batch-stats.json. Returns {} if the file is missing or corrupt.
+// Corrupt JSON is treated as empty (warning only) — so a batch is not
+// blocked by a damaged file.
 /**
  * @param {string} filePath
  * @returns {object}
@@ -50,7 +50,8 @@ function loadStats(filePath) {
   }
 }
 
-// Save atomically (write tmp + rename) supaya crash mid-write gak rusak file.
+// Save atomically (write tmp + rename) so a crash mid-write does not corrupt
+// the file.
 /**
  * @param {string} filePath
  * @param {object} stats
@@ -63,7 +64,7 @@ function saveStats(filePath, stats) {
   fs.renameSync(tmp, filePath);
 }
 
-// Apakah domain ini punya sisa quota hari ini?
+// Does this domain still have remaining quota today?
 // `cap` = max registrations per domain per UTC day.
 /**
  * @param {object} stats
@@ -94,9 +95,10 @@ function increment(stats, email) {
   return newUsed;
 }
 
-// Wrap + increment. Return true kalau di-allow (dan increment dicatat),
-// false kalau sudah cap.
-// Function ini yang dipakai bot.js per akun: kalau return false, skip akun.
+// Wrap + increment. Returns true if allowed (and increment is recorded),
+// false if the cap is already reached.
+// This function is what bot.js calls per account: if it returns false, the
+// account is skipped.
 /**
  * @param {string} filePath
  * @param {string} email

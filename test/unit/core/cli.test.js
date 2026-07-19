@@ -1,9 +1,6 @@
 "use strict";
-const { describe, it, before, after } = require("node:test");
+const { describe, it } = require("node:test");
 const assert = require("node:assert");
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
 
 function loadCli() {
   delete require.cache[require.resolve("../../../src/core/cli")];

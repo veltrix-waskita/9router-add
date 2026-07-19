@@ -1,5 +1,5 @@
 node_modules/
-config.json
+/config.json
 .env
 *.log
 test/fixtures/aliases.txt

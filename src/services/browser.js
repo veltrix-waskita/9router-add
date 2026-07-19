@@ -27,7 +27,7 @@ async function launchStealthBrowser(config, services, options = {}) {
   launchArgs.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
 
   const browser = await puppeteer.launch({
-    headless: config.headless !== false ? "new" : false,
+    headless: config.headless !== false ? true : false,
     args: launchArgs,
   });
 
@@ -82,6 +82,11 @@ async function newStealthPage(browser, fingerprint) {
  * Set value on React-controlled input fields.
  * React components often ignore page.type() because they use synthetic events.
  * This dispatches the native input event + React's setter.
+ *
+ * @param {Page} page - Puppeteer page.
+ * @param {string} selector - CSS selector for the input element.
+ * @param {string} value - Value to set on the input.
+ * @returns {Promise<void>}
  */
 async function reactTypeInput(page, selector, value) {
   await page.evaluate(
@@ -142,6 +147,10 @@ async function clickByText(page, text, opts = {}) {
 /**
  * Click at specific coordinates using mouse events.
  * Useful for elements that intercept click events via JS.
+ *
+ * @param {Page} page - Puppeteer page.
+ * @param {{x: number, y: number}} coords - Click coordinates.
+ * @returns {Promise<void>}
  */
 async function clickPrimaryButtonMouse(page, coords) {
   await page.mouse.click(coords.x, coords.y, { button: "left" });

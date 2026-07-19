@@ -1,6 +1,0 @@
-{
-  "endpoints": {
-    "authorize": "/api/oauth/antigravity/authorize",
-    "exchange": "/api/oauth/antigravity/exchange"
-  }
-}

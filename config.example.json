@@ -3,5 +3,14 @@
   "port": 3000,
   "proto": "http",
   "mode": "local",
-  "cliSecret": "your-cli-secret"
+  "cliSecret": "your-cli-secret",
+  "providers": {
+    "kiro": {
+      "aliasDomain": "minom.my.id",
+      "pollTimeout": 120000,
+      "pollInterval": 3000,
+      "quotaCap": 3
+    },
+    "antigravity": {}
+  }
 }

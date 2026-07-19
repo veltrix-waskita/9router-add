@@ -1,7 +1,7 @@
 "use strict";
 
-// Helpers untuk membaca OTP dari Gmail (forwarder alias -> Gmail) via IMAP.
-// Menggantikan scraping priyo.email. Dipakai oleh bot.js mode `email`.
+// Helpers for reading OTP from Gmail (forwarder alias -> Gmail) via IMAP.
+// Replaces scraping priyo.email. Used by bot.js in `email` mode.
 
 /**
  * Extract a verification code from raw email content (HTML or plain text).
@@ -21,7 +21,7 @@ function extractOtpFromRaw(raw) {
     const m = raw.match(re);
     if (m && m[1]) return m[1];
   }
-  // Fallback: cari digit 6 (umum AWS) di area dekat kata "code"
+  // Fallback: look for 6 digits (common AWS pattern) near the word "code"
   const ctxMatch = raw.match(/(?:code|verification)[^<]{0,500}?(\d{6})/i);
   if (ctxMatch) return ctxMatch[1];
   return null;
@@ -154,11 +154,11 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
   const useGmraw = !!(
     client.capabilities && client.capabilities.has && client.capabilities.has("X-GM-EXT-1")
   );
-  // PENTING: `in:anywhere` di X-GM-RAW tidak benar-benar bypass mailbox
-  // scope (E2E 2026-07-11). Setiap folder yang mau di-search harus di-lock
-  // dulu. Selalu search Spam juga — forwarder sering masuk Spam, dan
-  // `to:alias` IMAP search di folder Spam adalah safety net kalau server
-  // gak iklan X-GM-EXT-1.
+  // IMPORTANT: `in:anywhere` in X-GM-RAW does not actually bypass mailbox
+  // scope (verified E2E 2026-07-11). Every folder to be searched must be
+  // locked first. Always search Spam too — forwarders often land in Spam,
+  // and a `to:alias` IMAP search in the Spam folder is a safety net if the
+  // server does not advertise X-GM-EXT-1.
   const folders = ["INBOX", await findSpamPath(client)];
 
   const start = Date.now();
@@ -172,8 +172,9 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
         const lock = await client.getMailboxLock(folder).catch(() => null);
         if (!lock) continue;
         try {
-          // Bangun daftar query: primary (to: alias), fallback (subject + sender)
-          // untuk forwarder yang rewrite To header (mis. Firefox Relay).
+          // Build the query list: primary (to: alias) plus a fallback
+          // (subject + sender) for forwarders that rewrite the To header
+          // (e.g. Firefox Relay).
           let queries;
           if (useGmraw) {
             queries = [
@@ -240,7 +241,7 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
           debug,
         };
         if (deleteAfterRead && message.folder) {
-          // Butuh re-lock folder untuk delete (lock dilepas setiap round).
+          // Need to re-lock folder for delete (lock is released every round).
           const lock = await client.getMailboxLock(message.folder).catch(() => null);
           if (lock) {
             try {
