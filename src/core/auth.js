@@ -27,8 +27,10 @@ async function dashboardSession(config, httpClient) {
   }
   const setCookie = res.headers["set-cookie"];
   if (!setCookie) throw new Error("No session cookie returned");
+  // Node.js returns set-cookie as an array (one entry per cookie); use first.
+  const cookieRaw = Array.isArray(setCookie) ? setCookie[0] : setCookie;
   // Extract cookie value before semicolon
-  const cookie = setCookie.split(";")[0].trim();
+  const cookie = cookieRaw.split(";")[0].trim();
   return cookie;
 }
 
