@@ -1,0 +1,8 @@
+{
+  "endpoints": {
+    "deviceCode": "/api/oauth/kiro/device-code",
+    "poll": "/api/oauth/kiro/poll"
+  },
+  "pollTimeout": 120000,
+  "pollInterval": 3000
+}
