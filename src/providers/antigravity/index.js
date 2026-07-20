@@ -86,8 +86,9 @@ class AntigravityProvider extends BaseProvider {
    *
    * Mirrors the reference's automateGoogleLogin (browser command):
    * request the authorize URL (with PKCE), run the Google OAuth browser
-   * flow to capture the code, exchange the code for tokens. In local mode
-   * the result is also mirrored into the SQLite DB via injectToDb.
+   * flow to capture the code, exchange the code for tokens. 9router stores
+   * the resulting connection itself (with the access token); we do not
+   * write to the local SQLite DB from this flow.
    *
    * @param {{email?: string, password?: string, name?: string}} credentials - Google account credentials.
    * @param {{proxy?: object, fingerprint?: object}} [options={}] - Run options.
@@ -133,71 +134,12 @@ class AntigravityProvider extends BaseProvider {
     });
     console.log(`[${credentials.email}] Exchange complete`);
 
-    // 4. Local mode: mirror the connection into the SQLite DB.
-    if (this.config.mode === "local") {
-      const dbResult = await this.injectToDb({
-        provider: "antigravity",
-        authType: "oauth",
-        name: credentials.name || credentials.email,
-        email: credentials.email,
-        data: this._buildDataBlob(credentials.email, exchangeResult),
-      });
-      return { ok: true, ...dbResult };
-    }
-
+    // 9router stores the connection itself via the exchange endpoint (with the
+    // access token). We must NOT injectToDb here in local mode — doing so
+    // creates a duplicate row WITHOUT the token (the exchange response does
+    // not return it; only 9router holds it internally). list/inspect/delete
+    // read 9router's row directly via core/db.
     return { ok: true, connection: exchangeResult };
-  }
-
-  /**
-   * Build the local DB `data` blob for a connection.
-   *
-   * Mirrors the reference's injectToken (bot.js 111-153): extracts the
-   * token trio from the exchange response, computes the GCP projectId,
-   * expiry timestamp, and the fixed Google OAuth scope set. Extra fields
-   * on the exchange response are spread in (`...rest`) without clobbering
-   * the computed ones.
-   *
-   * Tokens live INSIDE `data` (never as top-level DB columns) so they
-   * cannot be accidentally logged by DB-listing code paths.
-   *
-   * @param {string} email - Account email.
-   * @param {object} exchangeResult - Exchange response (must contain accessToken/refreshToken/expiresIn).
-   * @returns {object} The data blob to JSON-stringify into the `data` column.
-   */
-  _buildDataBlob(email, exchangeResult) {
-    const projectId = `agy-${email
-      .split("@")[0]
-      .replace(/[^a-z0-9]/gi, "-")
-      .toLowerCase()}`;
-
-    const expiresInSec = exchangeResult.expiresIn || 3599;
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + expiresInSec * 1000);
-
-    return {
-      // Fixed Google OAuth scope set used by the Antigravity client.
-      scope:
-        "https://www.googleapis.com/auth/experimentsandconfigs " +
-        "https://www.googleapis.com/auth/userinfo.email " +
-        "https://www.googleapis.com/auth/cclog " +
-        "https://www.googleapis.com/auth/userinfo.profile " +
-        "openid " +
-        "https://www.googleapis.com/auth/cloud-platform",
-      projectId,
-      testStatus: "active",
-      lastUsedAt: now.toISOString(),
-      lastRefreshAt: now.toISOString(),
-      consecutiveUseCount: 0,
-      backoffLevel: 0,
-      // Spread the exchange response last (minus the fields we override) so
-      // server-provided values (tokens, etc.) land in `data` but our
-      // computed projectId/expiresAt/scope always win.
-      ...exchangeResult,
-      accessToken: exchangeResult.accessToken,
-      refreshToken: exchangeResult.refreshToken,
-      expiresAt: expiresAt.toISOString(),
-      expiresIn: expiresInSec,
-    };
   }
 
   // ============================================================

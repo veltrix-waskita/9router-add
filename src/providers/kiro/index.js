@@ -108,18 +108,11 @@ class KiroProvider extends BaseProvider {
     // 4. Poll until 9router stores the connection (includes rename step).
     const pollResult = await this.pollUntilConnected(deviceData, resolvedEmail);
 
-    // 5. Local mode: mirror into the SQLite DB.
-    if (this.config.mode === "local") {
-      const dbResult = await this.injectToDb({
-        provider: "kiro",
-        authType: method,
-        name: resolvedEmail,
-        email: resolvedEmail,
-        data: pollResult,
-      });
-      return { ok: true, ...dbResult };
-    }
-
+    // 9router stores the connection itself via the poll endpoint (with the
+    // access token). We must NOT injectToDb here in local mode — doing so
+    // creates a duplicate row WITHOUT the token (the poll response does not
+    // return it; only 9router holds it internally). list/inspect/delete read
+    // 9router's row directly via core/db.
     return { ok: true, ...pollResult };
   }
 
