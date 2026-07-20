@@ -38,7 +38,7 @@ async function resolveAuthHeaders(config, httpClient) {
   if (config.mode === "local") {
     const token = cliToken(config);
     return {
-      "X-9R-CLI-Auth": token,
+      "x-9r-cli-token": token,
       "Content-Type": "application/json",
     };
   }

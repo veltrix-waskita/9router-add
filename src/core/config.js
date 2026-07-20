@@ -28,10 +28,12 @@ function resolveMode(cfg) {
 function loadConfig(argv, opts = {}) {
   let cfg = { ...DEFAULTS };
 
-  // 1. Config file
+  // 1. Config file (opts.configPath wins; opts.secure===false skips lookup entirely — for hermetic tests)
   const configPaths = [];
   if (opts.configPath) {
     configPaths.push(opts.configPath);
+  } else if (opts.secure === false) {
+    // skip file lookup
   } else {
     configPaths.push(path.join(process.cwd(), "config.json"));
     configPaths.push(path.join(os.homedir(), ".9router-add", "config.json"));

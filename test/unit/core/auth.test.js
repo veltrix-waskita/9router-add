@@ -51,7 +51,7 @@ describe("resolveAuthHeaders", () => {
       cliSecret: "test",
       machineIdPath,
     });
-    assert.ok(headers["X-9R-CLI-Auth"]);
+    assert.ok(headers["x-9r-cli-token"]);
     assert.strictEqual(headers["Content-Type"], "application/json");
   });
 
