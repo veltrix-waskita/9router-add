@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("crypto");
 const { BaseProvider } = require("../../base/provider");
 const {
   safeUrl,
@@ -83,7 +84,7 @@ class KiroProvider extends BaseProvider {
 
     // 1. Request device code (GET — no body).
     const deviceData = await this._apiCall("GET", this.constructor.endpoints.deviceCode);
-    console.log(`[${credentials.email}] Device code: ${deviceData.user_code}`);
+    console.log(`[${credentials.email}] Device code received (length ${String(deviceData.user_code || "").length})`);
 
     // 2-3. Run the appropriate browser flow.
     let resolvedEmail = credentials.email;
@@ -215,7 +216,7 @@ class KiroProvider extends BaseProvider {
         const body = await page.evaluate(() => document.body.innerText).catch(() => "");
 
         if (url !== lastLogUrl) {
-          console.log(`[${email}]    URL: ${url.slice(0, 100)}`);
+          console.log(`[${email}]    URL: ${url.split("?")[0].slice(0, 100)}`);
           lastLogUrl = url;
         }
 
@@ -543,7 +544,7 @@ class KiroProvider extends BaseProvider {
           const ss = `/tmp/kiro-aws-noemail-${Date.now()}.png`;
           await page.screenshot({ path: ss, fullPage: true }).catch(() => {});
           throw new Error(
-            `Could not find a 'Sign in with email' option on the AWS page. URL: ${url} Body: ${body.replace(/\s+/g, " ").slice(0, 200)} Screenshot: ${ss}`
+            `Could not find a 'Sign in with email' option on the AWS page. URL: ${url.split("?")[0]} Body: ${body.replace(/\s+/g, " ").slice(0, 200)} Screenshot: ${ss}`
           );
         }
         console.log(`[${label}]    Email input field already present on page`);
@@ -895,8 +896,7 @@ class KiroProvider extends BaseProvider {
       }
       const code = otpResult.otp;
       console.log(
-        `[${label}]    Code received: ${code} ` +
-          `(from="${otpResult.from}" subject="${otpResult.subject}" received="${otpResult.received}")`
+        `[${label}]    OTP code received (length ${code.length}, from="${otpResult.from}" received="${otpResult.received}")`
       );
 
       // Submit the code to AWS.
@@ -1054,7 +1054,7 @@ class KiroProvider extends BaseProvider {
         });
       });
       if (pwdPwd && passwordFields.length > 0) {
-        const pwd = account.password || `Kiro${Math.random().toString(36).slice(2, 10)}!A1`;
+        const pwd = account.password || `Kiro${crypto.randomBytes(6).toString("base64").slice(0, 8)}!A1`;
         console.log(
           `[${label}]    Found ${passwordFields.length} password field(s), filling password...`
         );
@@ -1196,7 +1196,7 @@ class KiroProvider extends BaseProvider {
         const body = await page.evaluate(() => document.body.innerText).catch(() => "");
 
         if (url !== lastLogUrl) {
-          console.log(`[${label}]    URL: ${url.slice(0, 100)}`);
+          console.log(`[${label}]    URL: ${url.split("?")[0].slice(0, 100)}`);
           lastLogUrl = url;
           stableCount = 0;
         } else {
@@ -1240,7 +1240,7 @@ class KiroProvider extends BaseProvider {
             console.log(
               `[${label}]    Registration-code page with password field detected (step 5b miss) — fill now`
             );
-            const pwd2 = account.password || `Kiro${Math.random().toString(36).slice(2, 10)}!A1`;
+            const pwd2 = account.password || `Kiro${crypto.randomBytes(6).toString("base64").slice(0, 8)}!A1`;
             const handles = await page.$$('input[type="password"]');
             for (const h of handles) {
               const vis = await h
