@@ -87,6 +87,7 @@ async function launchStealthBrowser(config, services, options = {}) {
 
   const browser = await puppeteer.launch({
     headless: config.headless !== false ? true : false,
+    executablePath: config.chromiumPath || config.executablePath,
     args: launchArgs,
   });
 
