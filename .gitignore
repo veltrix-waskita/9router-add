@@ -5,3 +5,4 @@ node_modules/
 test/fixtures/aliases.txt
 .batch-stats.json
 /proxies.txt
+__pycache__/

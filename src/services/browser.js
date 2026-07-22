@@ -85,9 +85,15 @@ async function launchStealthBrowser(config, services, options = {}) {
   // Common Puppeteer args
   launchArgs.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
 
+  // Per-provider chromiumPath override > top-level config. Some providers
+  // need CloakBrowser's anti-detect Chromium for JA3 fingerprint matching;
+  // others (kiro, antigravity) are happy with the default.
+  const chromiumPath =
+    options.chromiumPath || config.chromiumPath || config.executablePath;
+
   const browser = await puppeteer.launch({
     headless: config.headless !== false ? true : false,
-    executablePath: config.chromiumPath || config.executablePath,
+    executablePath: chromiumPath,
     args: launchArgs,
   });
 
