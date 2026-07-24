@@ -256,17 +256,78 @@ When pure-HTTP kiro ships, update tempmail dual-mode docs to note kiro OTP moves
 
 ## Appendix A — Endpoint map
 
-*To be filled after Phase D0 capture. Placeholder structure:*
+> Filled from Phase D0 capture (2026-07-24). 27 unique endpoint groups across 3 sub-flows:
+> **Profile API** (`profile.aws.amazon.com`), **Platform Signin** (`us-east-1.signin.aws`),
+> **Device Authorization** (`oidc.us-east-1.amazonaws.com` + `portal.sso` + `vs.aws.amazon.com`).
+> Full captured bodies at [`2026-07-23-kiro-aws-endpoint-map.md`](./2026-07-23-kiro-aws-endpoint-map.md).
 
-| Step | Method | Host + path | Request notes | Response notes |
-|------|--------|-------------|-----------------|----------------|
-| bootstrap | | `view.awsapps.com` … | | |
-| email_entry | | | | |
-| name | | | | |
-| otp_verify | | | | |
-| password | | | | |
-| device_confirm | | | | |
-| consent | | | | |
+### Step ordering (approximate flow)
+
+```
+verification_uri_complete → portal.sso signin → email_entry → otp_wait (IMAP) → otp_verify + name + password → device_confirm → consent → token
+```
+
+### Bootstrap (step: bootstrap)
+
+| Method | Host + path | Request keys | When |
+|--------|-------------|--------------|------|
+| `GET` | `view.awsapps.com` (redirect chain to `portal.sso.us-east-1.amazonaws.com/login`) | — | Start of flow |
+| `GET` | `portal.sso.us-east-1.amazonaws.com/login` | — | SSO login page |
+| `GET` | `portal.sso.us-east-1.amazonaws.com/token/whoAmI` | — | Token verification after sign-in |
+
+### Profile API — workflow start (called after signin page load)
+
+| Method | Host + path | Request keys | When |
+|--------|-------------|--------------|------|
+| `POST` | `profile.aws.amazon.com/api/start` | `workflowID`, `browserData` | Start Builder ID workflow |
+| `POST` | `profile.aws.amazon.com/api/get-config` | — | Feature flags |
+| `POST` | `profile.aws.amazon.com/api/get-app-context` | `workflowID` | App context |
+| `POST` | `profile.aws.amazon.com/api/send-otp` | `workflowState`, `email`, `browserData` | Send 6-digit OTP to email |
+
+### OTP verification + Name + Password (step: otp_verify / name / password)
+
+These are submitted together in `POST /api/create-identity`:
+
+| Method | Host + path | Request keys | When |
+|--------|-------------|--------------|------|
+| `POST` | `profile.aws.amazon.com/api/create-identity` | `workflowState`, `userData{email,fullName}`, `otpCode`, `browserData` | Submit OTP + name in one call |
+
+### Platform Signin — execute steps
+
+The `signup/api/execute` endpoint handles multi-step signup forms (locale pages, credential collection, etc.):
+
+| Method | Host + path | Request keys | When |
+|--------|-------------|--------------|------|
+| `POST` | `us-east-1.signin.aws/platform/d-*/signup/api/execute` | `stepId`, `workflowStateHandle`, `inputs[]`, `visitorId`, `requestId` | Multi-step signup execution |
+| `POST` | `us-east-1.signin.aws/platform/d-*/api/execute` | `stepId`, `workflowStateHandle`, `inputs[]`, `requestId` | General step execution |
+| `POST` | `us-east-1.signin.aws/platform/user-event/send-event` | `inputs[]`, `requestId` | Page-load/user-event tracking |
+
+### Device authorization (steps: device_confirm)
+
+| Method | Host + path | Request keys | When |
+|--------|-------------|--------------|------|
+| `POST` | `oidc.us-east-1.amazonaws.com/device_authorization/accept_user_code` | `userCode`, `userSessionId` | User approves the device |
+| `POST` | `oidc.us-east-1.amazonaws.com/device_authorization/associate_token` | `deviceContext`, `userSessionId` | Associate SSO token with device |
+
+### Consent + Token exchange (step: consent)
+
+| Method | Host + path | Request keys | When |
+|--------|-------------|--------------|------|
+| `POST` | `oidc.us-east-1.amazonaws.com/consent_details` | `deviceContextId`, `clientId`, `clientType`, `userSessionId` | Get Kiro consent screen details |
+| `POST` | `portal.sso.us-east-1.amazonaws.com/auth/sso-token` | — | Exchange SSO for session token |
+| `POST` | `vs.aws.amazon.com/token` | — | Final access-token exchange |
+
+### Telemetry / noise (skip in worker)
+
+| Method | Host + path | Notes |
+|--------|-------------|-------|
+| `POST` | `d2c.aws.amazon.com/csds/collector/v1/events/batch` | Usage metrics |
+| `POST` | `us-east-1.prod.pl.panorama.console.api.aws/panoramaroute` | Panorama telemetry |
+| `POST` | `us-east-1.signin.aws/metrics/fingerprint` | Browser fingerprint |
+| `POST` | `log.sso-portal.us-east-1.amazonaws.com/log` | Client-side logging |
+| `GET` | `us-east-1.signin.aws/assets/locales/en/*.json` | Locale bundles |
+| `GET` | `profile.aws.amazon.com/dist/locales/*.json` | Locale bundles |
+| `GET` | `us-east-1.signin.aws/platform/d-*/signup` | Signup page HTML |
 
 ## Appendix B — Security checklist
 
