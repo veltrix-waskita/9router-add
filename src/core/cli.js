@@ -83,6 +83,7 @@ function loadServices(config) {
   if (config.imap) {
     services.imap = require("../services/imap-otp");
   }
+  services.tempmail = require("../services/tempmail");
   if (config.proxyFile) {
     const proxy = require("../services/proxy");
     services.proxy = {
@@ -156,7 +157,14 @@ async function run(argv, config, api, providers) {
   switch (command) {
     case "add": {
       const credentials = { email: args.email, password: args.password, name: args.name };
-      const options = { proxy: args.proxy, dryRun: args["dry-run"] === true };
+      const options = {
+        proxy: args.proxy,
+        dryRun: args["dry-run"] === true,
+        emailSource: args["email-source"] || "imap",
+      };
+      if (args["tempmail-providers"]) {
+        options.tempmailProviders = String(args["tempmail-providers"]).split(",").map(s => s.trim()).filter(Boolean);
+      }
       const result = await provider.add(credentials, options);
       console.log(JSON.stringify(result, null, 2));
       break;

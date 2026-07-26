@@ -3,6 +3,7 @@
   "port": 20128,
   "proto": "http",
   "mode": "local",
+  "dbPath": "/home/YOU/.9router/db/data.sqlite",
   "cliSecret": "your-cli-secret",
   "chromiumPath": "/usr/bin/chromium",
   "providers": {
@@ -12,7 +13,15 @@
       "pollInterval": 3000,
       "quotaCap": 3
     },
-    "antigravity": {}
+    "antigravity": {},
+    "grok-cli": {
+      "aliasDomain": "minom.my.id",
+      "pollTimeout": 600000,
+      "pollInterval": 3000,
+      "quotaCap": 3,
+      "otpSubject": "SpaceXAI confirmation code",
+      "otpSenderDomain": "noreply.x.ai"
+    }
   },
   "imap": {
     "host": "imap.gmail.com",
@@ -21,5 +30,11 @@
     "password": "your-gmail-app-password",
     "tls": true,
     "deleteAfterRead": true
+  },
+  "proxyFile": "proxies.txt",
+
+  "tempmail": {
+    "providers": ["ncaori", "zoromail"],
+    "defaultEmailSource": "imap"
   }
 }
