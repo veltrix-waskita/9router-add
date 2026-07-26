@@ -5,25 +5,45 @@
 
 /**
  * Extract a verification code from raw email content (HTML or plain text).
- * Tries three ordered patterns plus a 6-digit "code"-context fallback.
+ * Tries ordered patterns plus multi-language fallbacks.
+ *
+ * Supported languages: English, Indonesian.
+ * Add new language keywords to `keywords` below as needed.
  *
  * @param {string|null|undefined} raw - Raw email body (HTML or plain text).
  * @returns {string|null} Extracted 4–8 digit code, or null if none found.
  */
 function extractOtpFromRaw(raw) {
   if (!raw || typeof raw !== "string") return null;
+
+  // Multi-language keywords matching near a digit block.
+  const codeKeywords = [
+    "code", "codes", "verification", "verify",
+    "kode", "kode verifikasi", "kode\\s*verifikasi", "verifikasi",
+    "otp",
+  ].join("|");
+
   const patterns = [
+    // Language-agnostic: class="code" div
     /<div[^>]*class=["'][^"']*code[^"']*["'][^>]*>\s*(\d{4,8})\s*<\/div>/i,
+    // Explicit "Verification code:" prefix (English or similar)
     /Verification code:\s*(?:<\/[^>]+>\s*)*<[^>]+>\s*(\d{4,8})/i,
-    /(?:verification|verify|code)[\s\S]{0,300}?(\d{4,8})/i,
+    // Any keyword within 300 chars before the digit block
+    new RegExp(`(?:${codeKeywords})[\\s\\S]{0,300}?(\\d{4,8})`, "i"),
   ];
   for (const re of patterns) {
     const m = raw.match(re);
     if (m && m[1]) return m[1];
   }
-  // Fallback: look for 6 digits (common AWS pattern) near the word "code"
-  const ctxMatch = raw.match(/(?:code|verification)[^<]{0,500}?(\d{6})/i);
+  // Fallback: 6-digit block within 500 chars of a keyword
+  const ctxMatch = raw.match(new RegExp(`(?:${codeKeywords})[^<]{0,500}?(\\d{6})`, "i"));
   if (ctxMatch) return ctxMatch[1];
+  // Ultimate fallback: any standalone 6-digit number.
+  // Relies on the caller (pickRecencyMatch) to confirm recency and source.
+  // Avoids matching embedded digits (e.g. dates, IDs) by requiring
+  // non-digit boundaries on both sides.
+  const generic = raw.match(/(?<!\d)(\d{6})(?!\d)/);
+  if (generic) return generic[1];
   return null;
 }
 
@@ -40,15 +60,19 @@ function buildGmrawQuery(alias, subject) {
 }
 
 /**
- * Build a fallback Gmail X-GM-RAW query that matches by subject + AWS
- * sender domain instead of To header. Useful when the forwarder rewrites
- * the To header (e.g. Firefox Relay).
+ * Build a fallback Gmail X-GM-RAW query that matches by sender domain
+ * (signin.aws) and a broader subject pattern. The subject regex catches
+ * both English and Indonesian AWS Builder ID verification email subjects:
  *
- * @param {string} subject - Expected email subject line.
+ *   EN: "Verify your AWS Builder ID email address"
+ *   ID: "Verifikasi alamat email AWS Builder ID Anda"
+ *
+ * @param {string} _subject - Ignored; a broad subject pattern is used.
  * @returns {string} Gmail raw search query string.
  */
-function buildGmrawFallbackQuery(subject) {
-  return `from:signin.aws subject:"${subject}" in:anywhere`;
+function buildGmrawFallbackQuery(_subject) {
+  // Match either English or Indonesian subject patterns.
+  return `from:signin.aws subject:{Verify your AWS Verifikasi alamat} in:anywhere`;
 }
 
 /**
@@ -183,14 +207,22 @@ async function getOtpViaImap(imapCfg, alias, opts = {}) {
             ];
             debug.usedGmraw = true;
           } else {
-            queries = [{ q: null, type: "imap" }]; // use imap {to,subject} below
+            // Plain IMAP: try broad subject (strips "email address")
+            // then fall back to from: signin.aws (catches localized
+            // subjects like Indonesian "Verifikasi alamat...")
+            const broadSubject = subject.replace(/\s*email address\s*/i, " ").trim();
+            queries = [
+              { q: { to: alias, subject: broadSubject }, type: "imap" },
+              { q: { from: "signin.aws", subject: broadSubject }, type: "imap" },
+              { q: { from: "signin.aws" }, type: "imap" },
+            ];
           }
 
           let uids = [];
           let usedFallback = false;
           for (const { q, type } of queries) {
             const r = type === "imap"
-              ? await client.search({ to: alias, subject }, { uid: true })
+              ? await client.search(q, { uid: true })
               : await client.search({ gmraw: q }, { uid: true });
             if (r && r.length > 0) {
               uids = r;

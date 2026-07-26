@@ -16,6 +16,18 @@ describe("extractOtpFromRaw", () => {
     const text = 'Your verification code is 345678. Please enter it.';
     assert.strictEqual(imap.extractOtpFromRaw(text), "345678");
   });
+  it("should extract 6-digit from Indonesian 'kode verifikasi' context", () => {
+    const idText = 'Kode verifikasi AWS Builder ID Anda adalah 112233';
+    assert.strictEqual(imap.extractOtpFromRaw(idText), "112233");
+  });
+  it("should extract from Indonesian HTML email (kode verifikasi)", () => {
+    const html = `<html><body><p>Gunakan kode verifikasi ini: <strong>998877</strong></p></body></html>`;
+    assert.strictEqual(imap.extractOtpFromRaw(html), "998877");
+  });
+  it("should extract standalone 6-digit as ultimate fallback", () => {
+    const text = 'Kode Anda: 445566. Jangan bagikan kode ini.';
+    assert.strictEqual(imap.extractOtpFromRaw(text), "445566");
+  });
   it("should return null for no match", () => {
     assert.strictEqual(imap.extractOtpFromRaw("hello world"), null);
   });
