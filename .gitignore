@@ -3,6 +3,17 @@ node_modules/
 .env
 *.log
 test/fixtures/aliases.txt
+/aliases.txt
+/generated-accounts-*.json
 .batch-stats.json
 /proxies.txt
+# Backups/variants carry the same user:pass@host credentials — never commit.
+/proxies.txt.*
+/proxies*.txt
 __pycache__/
+src/providers/kiro/worker/.venv/
+src/providers/grok-cli/worker/.venv/
+captcha-solver/venv/
+captcha-solver/.venv/
+captcha-solver/solver.env
+
