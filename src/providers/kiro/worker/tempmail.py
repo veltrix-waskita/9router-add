@@ -174,6 +174,7 @@ class NcaoriMail:
         self.s = _ensure_creq().Session()
         self.impersonate = impersonate
         self.address: str | None = None
+        self._seen_ids: set[str] = set()
 
     def create_account(self) -> str:
         local = f"{random.choice(self.WORDS1)}_{random.choice(self.WORDS2)}{uuid.uuid4().hex[:4]}"
@@ -195,7 +196,6 @@ class NcaoriMail:
         if not self.address:
             raise RuntimeError("ncaori: no address")
         deadline = time.time() + timeout
-        seen: set[str] = set()
         poll = float(os.getenv("OTP_POLL_S", "0.8"))
         poll_max = float(os.getenv("OTP_POLL_MAX_S", "2.0"))
         t0 = time.time()
@@ -215,10 +215,10 @@ class NcaoriMail:
                 msgs = data.get("emails") if isinstance(data, dict) else []
                 for m in msgs or []:
                     mid = str(m.get("id") or "")
-                    if mid and mid in seen:
+                    if mid and mid in self._seen_ids:
                         continue
                     if mid:
-                        seen.add(mid)
+                        self._seen_ids.add(mid)
                     blob = " ".join(
                         str(m.get(k, "") or "")
                         for k in ("subject", "sender", "body_text", "body_html", "preview")
@@ -285,7 +285,6 @@ class Zoromail:
         if not self.address:
             raise RuntimeError("zoromail: no address")
         deadline = time.time() + timeout
-        seen: set[str] = set()
         while time.time() < deadline:
             try:
                 msgs = self._api("GET", f"/emails/{self.address}/messages") or []
@@ -295,10 +294,10 @@ class Zoromail:
                 msgs = []
             for m in msgs:
                 mid = str(m.get("id") or "")
-                if mid and mid in seen:
+                if mid and mid in self._seen_ids:
                     continue
                 if mid:
-                    seen.add(mid)
+                    self._seen_ids.add(mid)
                 blob = " ".join(str(m.get(k, "") or "") for k in ("subject", "from", "preview", "text"))
                 code = extract_code(blob)
                 if code:
@@ -339,6 +338,7 @@ class EmailBox:
         self.provider_name: str | None = None
         self.impl: Any = None
         self.address: str | None = None
+        self._seen: set[str] = set()
 
     @staticmethod
     def _providers_from_env() -> list[str] | None:
