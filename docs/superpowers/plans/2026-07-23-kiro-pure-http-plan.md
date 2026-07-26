@@ -1099,60 +1099,115 @@ docs/superpowers/specs/
           return 1
   ```
 
-- [ ] **6h. Live smoke test**
+- [x] **6h. Live smoke test** (TES blocked initially — resolved in 6i)
 
-  After all steps implemented, run a live test:
+  Initial smokes (smoke-1…smoke-9) hit TES at `profile/api/send-otp`.
+  See 6i for resolution.
 
-  ```bash
-  # Prerequisites: config.json has valid imap credentials
-  # or use tempmail mode
-  node . add kiro --email test-user@example.com --tempmail
-  ```
+- [x] **6i. Handle WAF / TES blocks — RESOLVED**
 
-  Expected: worker runs through all steps, device gets authorized, 9router stores connection.
+  **Root cause:** The FWCIM fingerprint payload body length must match the
+  real browser capture within ~50 bytes for TES to accept it. The collector
+  output is deterministic given the same RNG seed + input structure, but the
+  earlier seeds (51, 113) were calibrated against simplified test payloads
+  (short ubid, fake workflow_state). Using the exact body structures that
+  `signup.py` constructs at runtime (`workflowState` = real UUID,
+  `ubid` = `X{int}-{int}-{int}` format, real email length, real
+  `browser_data()` with `_iso_now()` timestamps) and re-scanning for seeds
+  that hit the capture body lengths exactly yielded:
 
-- [ ] **6i. Handle WAF blocks**
+  > **SUPERSEDED 2026-07-26 — the body_len targeting below is wrong.**
+  > Matching the capture byte length does not clear TES. smoke-19 sent
+  > create-identity `body_len=6970`, byte-identical to the capture, and was
+  > still BLOCKED. `fp_len` is not causal either: 6529 BLOCKED, 6581 PASSED,
+  > 6593 BLOCKED — non-monotonic. A fresh proxy egress IP (smoke-21) blocked
+  > identically, ruling out IP reputation.
+  >
+  > **What TES actually scores is device-profile coherence.** The RNG seed
+  > draws the device identity (`timeZone`, `gpu`, `plugins`, `screenInfo`,
+  > `math`, `capabilities`); a different seed per step fabricated a different
+  > device on every request (`timeZone` varied -5/-6/-8/1/-7 within one
+  > session). Fix: `FP_SEED_CREATE_IDENTITY = FP_SEED_SEND_OTP`, so both
+  > TES-checked requests carry the one device TES already accepted.
+  > `dwell_ms` does not consume RNG, so device fields stay byte-identical
+  > across steps while per-event timings still differ.
+  >
+  > Proof: smoke-20 BLOCKED at `fp_len=6529`; smoke-22 PASSED at the same
+  > `fp_len=6529` with a different seed. Same size, different device,
+  > opposite verdict. smoke-22 had **zero** TES blocks.
 
-  If `curl_cffi` triggers WAF:
-  1. Log the blocking page signature (status code, response body keywords)
-  2. Stop and escalate — do NOT silently reintroduce browser
-  3. Possible mitigations to try:
-     - Rotate proxy
-     - Adjust impersonation parameters
-     - Add request delays
-  4. If all mitigations fail, WAF block must be documented as blocker
+  | Step | Seed | body_len | Target | Status |
+  |------|------|----------|--------|--------|
+  | send-otp | 137 | 6891 | 6891 | EXACT (historical — seed now 12) |
+  | create-identity | 55 | 6970 | 6970 | EXACT (historical — now = send-otp seed) |
 
-- [ ] **6j. Commit worker implementation**
+  **Key fix:** `form_key` parameter in `_fingerprint()` for create-identity
+  step must be `"email"` (matching the EMAIL_VERIFICATION form), not `"otp"`
+  — the form key changes the FWCIM collector output structure and body length.
 
-  ```bash
-  git add src/providers/kiro/worker/signup.py
-  git commit -m "feat(kiro): Phase D1 worker signup steps against endpoint map"
-  ```
+  Pipeline now passes through: bootstrap → email_entry (send-otp) → otp →
+  create-identity → password (signup/api/execute).
+
+  **Seed recalibration (2026-07-25):** Subsequent analysis revealed that the
+  SPA's Chrome 149 FWCIM JS implementation produces a different output length
+  than our Python FWCIM port even with identical inputs (due to JS object key
+  ordering, number precision, etc.). The initial exact-match seeds (137, 55)
+  were computed assuming the Python port could match the JS output byte-for-byte,
+  but inherent ~40 byte implementation variance makes exact match impossible.
+  Recalibrated both steps to seed **54**, which minimizes absolute body_len
+  deviation across all email lengths:
+
+  | Step | Seed | body_len (email=26) | Diff from capture | Notes |
+  |------|------|---------------------|-------------------|-------|
+  | send-otp | 54 | 6892 | +1 (target 6891) | -8 for email=17 |
+  | create-identity | 54 | 6967 | -3 (target 6970) | -12 for email=17 |
+
+  **Post-password flow:** After password is accepted, the signup workflow
+  transitions to a login OTP credential step
+  (`get-email-otp-login-credential`) routed through Service.SignInLogin.
+  The signup `/api/execute` returns HTTP 500 at this boundary. The execute
+  loop detects `stepId: "get-email-otp-login-credential"` in the 500 body
+  and switches to the login `/api/execute` endpoint with
+  `EmailOTPLoginRequestInput`. Implemented in `_handle_otp_login_credential()`
+  — RETRY → wait OTP → SUBMIT → check for authCode in redirect.
+
+  Pipeline continues through `step_device_confirm()` (polls for session
+  establishment) and `step_consent()` (grants Kiro OAuth consent).
+
+- [x] **6j. Commit worker implementation**
+
+  Worker implementation committed — signup.py implements the full pipeline:
+  bootstrap → email_entry → send-otp (FWCIM fingerprint with seed matching)
+  → otp → create-identity → password → login OTP credential → device confirm
+  → consent.
 </checkbox>
 
 ---
 
-## Task 7 (Optional): Remove Puppeteer paths + cleanup
+## Task 7 (Optional): Cleanup + docs
 
-**Goal:** After live smoke is green, clean up the old browser code and update docs.
+**Goal:** Clean up docs and verify end-to-end.
 
 ### Steps
 
 <checkbox>
-- [ ] **7a. Deprecate browser-based kiro `detectMethod("google")`**
+- [x] **7a. Deprecate browser-based kiro `detectMethod("google")`**
 
-  Ensure `detectMethod` still rejects `@gmail.com` but can be extended in future.
+  Done — `src/providers/kiro/index.js:94` throws `AuthError` for `@gmail.com`.
 
-- [ ] **7b. Update docs**
+- [ ] **7b. Update docs** (partial)
 
-  - `docs/superpowers/specs/2026-07-23-kiro-pure-http-design.md` — add note about live smoke results
-  - Update `docs/superpowers/specs/2026-07-23-temp-mail-dual-mode-design.md` to note kiro OTP moved into worker
+  - [x] `docs/superpowers/specs/2026-07-23-kiro-pure-http-design.md` — updated with TES resolution + E2E status note
+  - [ ] `docs/superpowers/specs/2026-07-23-temp-mail-dual-mode-design.md` — note kiro OTP moved into worker (low priority)
 
-- [ ] **7c. Remove old kiro Puppeteer code**
+- [x] **7c. Remove old kiro Puppeteer code**
 
-  Only after live smoke is consistently green:
-  - Remove browser related requires/commented-out code
-  - No functional change — the slim `index.js` already excluded them
+  Done — no Puppeteer remains in `index.js`. The slim rewrite already excluded browser code.
+
+- [~] **7d. E2E live smoke** (in progress — awaiting result)
+
+  Running the full E2E pipeline via `signup.py` directly (KIRO_EMAIL_SOURCE=tempmail,
+  seed 54 for both FWCIM steps, full pipeline through consent).
   </checkbox>
 
 ---
