@@ -13,6 +13,7 @@ Solve ANY captcha through one API. Sync (POST /solve) + async (GET /turnstile �
 By FEB-FRMN · https://saweria.co/febfrmn
 """
 import os, sys, io, re, json, time, uuid, base64, asyncio, logging
+import ipaddress, socket
 import urllib.request, urllib.error
 from urllib.parse import urlparse
 from typing import Optional
@@ -28,7 +29,10 @@ if sys.platform == "win32":
 
 # ─── Config ───────────────────────────────────────────────────────────────
 PORT              = int(os.getenv("PORT", "8877"))
-HOST              = os.getenv("HOST", "0.0.0.0")
+# Loopback by default: this service takes URLs and fetches them, so exposing it
+# on every interface hands that capability to the whole network. Opt in
+# explicitly with HOST=0.0.0.0 if you really mean it.
+HOST              = os.getenv("HOST", "127.0.0.1")
 HEADLESS          = os.getenv("SOLVER_HEADLESS", "1") != "0"
 THREADS           = int(os.getenv("SOLVER_THREADS", "2"))
 PAGES_PER_THREAD  = int(os.getenv("SOLVER_PAGES", "1"))
@@ -36,6 +40,8 @@ CLEANUP_MIN       = int(os.getenv("SOLVER_CLEANUP_MIN", "10"))
 PROXY_SUPPORT     = os.getenv("SOLVER_PROXY_SUPPORT", "0") == "1"
 PROXY_FILE        = os.getenv("SOLVER_PROXY_FILE", "proxies.txt")
 ALLOW_PRIVATE     = os.getenv("SOLVER_ALLOW_PRIVATE", "0") == "1"
+# Reading client-supplied filesystem paths is a debug convenience, not a feature.
+ALLOW_LOCAL_FILES = os.getenv("SOLVER_ALLOW_LOCAL_FILES", "0") == "1"
 CAPSOLVER_API_KEY = os.getenv("CAPSOLVER_API_KEY", "")
 SOLVER_MODE       = os.getenv("SOLVER_MODE", "auto").lower()   # auto | local | capsolver
 
@@ -52,19 +58,53 @@ SUPPORTED = ["math", "text", "image", "slider", "turnstile", "recaptcha",
 log = logging.getLogger("solver")
 
 # ─── SSRF guard ─────────────────────────────────────────────────────────────
-_PRIV = [re.compile(p) for p in [
-    r"^127\.\d+\.\d+\.\d+", r"^10\.\d+\.\d+\.\d+",
-    r"^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+", r"^192\.168\.\d+\.\d+",
-    r"^0\.0\.0\.0$", r"^localhost$", r"^::1$"]]
+# Regex-matching the hostname string is not enough: `http://evil.test` resolving
+# to 127.0.0.1 sails straight through, and 169.254.169.254 (cloud metadata) was
+# never in the deny list at all. Resolve the name and judge every address it
+# maps to.
+def _addr_is_forbidden(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local      # 169.254.0.0/16 — cloud metadata lives here
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
 def check_ssrf(u):
     if ALLOW_PRIVATE or not u:
         return
     p = urlparse(u)
     if p.scheme not in ("http", "https"):
         raise HTTPException(400, f"Bad scheme: {p.scheme}")
-    for r in _PRIV:
-        if r.search(p.hostname or ""):
-            raise HTTPException(400, f"Private host: {p.hostname}")
+    host = (p.hostname or "").rstrip(".").lower()
+    if not host:
+        raise HTTPException(400, "No host in URL")
+    try:
+        infos = socket.getaddrinfo(host, p.port or (443 if p.scheme == "https" else 80))
+    except socket.gaierror:
+        raise HTTPException(400, f"Cannot resolve host: {host}")
+    for info in infos:
+        ip = info[4][0]
+        if _addr_is_forbidden(ip):
+            raise HTTPException(400, f"Private/reserved host: {host}")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A 302 to http://169.254.169.254 would bypass a check done only on the
+    original URL, so don't follow redirects on user-supplied image URLs."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise HTTPException(400, f"Redirect not allowed (-> {urlparse(newurl).hostname})")
+
+
+_no_redirect_opener = urllib.request.build_opener(_NoRedirect)
 
 # ─── image helpers ──────────────────────────────────────────────────────────
 def load_image_bytes(src: str) -> bytes:
@@ -74,10 +114,17 @@ def load_image_bytes(src: str) -> bytes:
     if s.startswith("data:"):
         s = s.split(",", 1)[1]
     if s.startswith("http://") or s.startswith("https://"):
+        # Validate HERE rather than at each call site: /solve only ever checked
+        # req.url, so req.image / req.bg_image / req.puzzle_image were fetched
+        # unvalidated. Centralising means no future caller can forget.
+        check_ssrf(s)
         req = urllib.request.Request(s, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with _no_redirect_opener.open(req, timeout=30) as r:
             return r.read()
-    if os.path.exists(s):
+    # `image` is client-supplied, so treating it as a filesystem path let a
+    # caller read any file the solver can (image=/etc/passwd). Local paths are
+    # a CLI/debug convenience only — off unless explicitly enabled.
+    if ALLOW_LOCAL_FILES and os.path.exists(s):
         with open(s, "rb") as f:
             return f.read()
     return base64.b64decode(s)

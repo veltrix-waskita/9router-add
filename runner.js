@@ -468,7 +468,10 @@ async function ensureSolverStarted() {
 
   try {
     await captchaSolver.start(SOLVER_DIR, {
-      SOLVER_ALLOW_PRIVATE: "1",
+      // Do NOT set SOLVER_ALLOW_PRIVATE=1 — it short-circuits check_ssrf()
+      // entirely, and nothing here needs it: the only URL we hand the solver
+      // is the public Turnstile page (accounts.x.ai).
+      HOST: "127.0.0.1",
       SOLVER_MODE: process.env.SOLVER_MODE || "local",
       SOLVER_HEADLESS: process.env.SOLVER_HEADLESS || "1",
     });
