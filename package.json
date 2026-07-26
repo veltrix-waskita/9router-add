@@ -6,14 +6,16 @@
   "main": "src/index.js",
   "scripts": {
     "test": "node --test",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "interactive": "node runner.js",
+    "runner": "node runner.js"
   },
   "dependencies": {
+    "@wanglinsaputra/tempmail-wrapper": "^1.2.0",
+    "imapflow": "^1.4.7",
     "puppeteer-core": "^25.3.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "sqlite3": "^6.0.1",
-    "imapflow": "^1.4.7"
-  },
-  "devDependencies": {}
+    "sqlite3": "^6.0.1"
+  }
 }
