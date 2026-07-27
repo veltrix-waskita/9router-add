@@ -40,6 +40,147 @@ def _ensure_creq():
     return creq
 
 
+# ---- password encryption (signin SPA PasswordEncryptor port) ---------------
+#
+# The signin SPA encrypts new passwords before POSTing them:
+#   [resultType, encrypted, errorLog] = await encryptPassword(pw, ctx)
+# where ctx = workflowResponseData.encryptionContextResponse =
+#   {publicKey: JWK, issuer, audience, region}.
+# encryptPassword → new PasswordEncryptor(issuer, region)
+#   .encrypt(publicKey, password, audience) → JWE compact serialization.
+# On success the wire input for password *creation* (CreatePasswordPage.ce) is
+#   {input_type: "PasswordRequestInput", password: <JWE>,
+#    successfullyEncrypted: "SUCCESSFUL"}
+# (ENCRYPTION_RESULT_TYPE enum: SUCCESSFUL | FAILED | NOT_APPLICABLE).
+# UpdatePasswordRequestInput/newPassword is the *change*-password page — it
+# needs currentPassword and 400s here (live-verified 2026-07-28).
+#
+# JWE layout (jose-jwe-jws via WebCrypto):
+#   protected header: alg=RSA-OAEP-256, kid=<jwk.kid>, enc=A256GCM,
+#                     cty="enc", typ="application/aws+signin+jwe"
+#   claims: {iss, iat, nbf, jti, exp: iat+300, aud, password}
+#     iss = region ? region + "." + issuer : issuer
+#     aud = region ? region + "." + audience : audience
+#
+# WebCrypto's "RSA-OAEP-256" uses MGF1 with the SAME hash (SHA-256) — unlike
+# RFC 7518's RSA-OAEP-256 (MGF1-SHA1). The server decrypts what browsers
+# produce, so we mirror WebCrypto: OAEP(SHA-256, MGF1(SHA-256)).
+
+_JWE_TYP = "application/aws+signin+jwe"
+_JWE_PASSWORD_PERIOD = 300  # exp = iat + 300s (PASSWORD_PERIOD)
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _jwk_to_public_key(jwk: dict) -> Any:
+    from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
+
+    n = int.from_bytes(base64.urlsafe_b64decode(jwk["n"] + "=" * (-len(jwk["n"]) % 4)), "big")
+    e = int.from_bytes(base64.urlsafe_b64decode(jwk["e"] + "=" * (-len(jwk["e"]) % 4)), "big")
+    return RSAPublicNumbers(e, n).public_key()
+
+
+def _encrypt_password_jwe(password: str, ctx: dict) -> str:
+    """Encrypt a password exactly like the signin SPA's PasswordEncryptor.
+
+    Returns the JWE compact serialization. Raises on any crypto failure —
+    callers fall back to the plaintext/NOT_APPLICABLE path (the SPA's own
+    FAILED branch), which AWS accepts for some steps but not password
+    creation.
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    jwk = ctx["publicKey"]
+    if jwk.get("alg") != "RSA-OAEP-256":
+        raise ValueError(f"unsupported jwk alg: {jwk.get('alg')}")
+    issuer = str(ctx.get("issuer") or "")
+    audience = str(ctx.get("audience") or "")
+    region = str(ctx.get("region") or "")
+
+    protected = {
+        "alg": "RSA-OAEP-256",
+        "kid": jwk.get("kid", ""),
+        "enc": "A256GCM",
+        "cty": "enc",
+        "typ": _JWE_TYP,
+    }
+    protected_b64 = _b64url(json.dumps(protected, separators=(",", ":")).encode())
+
+    now = int(time.time())
+    claims = {
+        "iss": f"{region}.{issuer}" if region else issuer,
+        "iat": now,
+        "nbf": now,
+        "jti": str(uuid.uuid4()),
+        "exp": now + _JWE_PASSWORD_PERIOD,
+        "aud": f"{region}.{audience}" if region else audience,
+        "password": password,
+    }
+    plaintext = json.dumps(claims, separators=(",", ":")).encode()
+
+    cek = os.urandom(32)  # A256GCM content-encryption key
+    iv = os.urandom(12)  # 96-bit GCM nonce
+    aad = protected_b64.encode("ascii")
+    ct_and_tag = AESGCM(cek).encrypt(iv, plaintext, aad)
+    ct, tag = ct_and_tag[:-16], ct_and_tag[-16:]
+
+    pub = _jwk_to_public_key(jwk)
+    encrypted_key = pub.encrypt(
+        cek,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None,
+        ),
+    )
+    return ".".join([
+        protected_b64,
+        _b64url(encrypted_key),
+        _b64url(iv),
+        _b64url(ct),
+        _b64url(tag),
+    ])
+
+
+def _build_password_input(password: str, encryption_context: dict | None) -> dict:
+    """Build the PasswordRequestInput the SPA sends for ANY password step.
+
+    Both the login page (get-password) and the creation page
+    (get-new-password-for-password-creation) encrypt with the same
+    PasswordEncryptor and send {input_type:"PasswordRequestInput",
+    password:<jwe>, successfullyEncrypted, errorLog?} with actionId:SUBMIT.
+    Plaintext survives only as the SPA's no-WebCrypto fallback
+    (successfullyEncrypted NOT_APPLICABLE) — AWS 400s it on steps that
+    require encryption (live-verified for creation and login 2026-07-28).
+    """
+    result_type = "NOT_APPLICABLE"
+    error_log: str | None = None
+    pw = password
+    if encryption_context:
+        try:
+            pw = _encrypt_password_jwe(password, encryption_context)
+            result_type = "SUCCESSFUL"
+        except Exception as e:
+            # Mirror the SPA's FAILED branch: plaintext + error name.
+            result_type = "FAILED"
+            error_log = type(e).__name__
+            emit({"event": "debug", "msg": "password-encrypt-failed", "error": redact_err(e)})
+    else:
+        emit({"event": "debug", "msg": "password-encrypt-no-context"})
+    inp: dict[str, Any] = {
+        "input_type": _PASSWORD_INPUT_TYPE,
+        "password": pw,
+        "successfullyEncrypted": result_type,
+    }
+    if error_log:
+        inp["errorLog"] = error_log
+    return inp
+
+
 # ---- constants (from Phase D0 endpoint map) --------------------------------
 
 # Hardcoded capture workflowID is NOT durable — live IDs are minted per signup
@@ -587,9 +728,11 @@ def _cookie_names(s: Any) -> list[str]:
 
 def _raise_http(step: str, resp: Any, label: str = "") -> None:
     status = getattr(resp, "status_code", 0) or 0
-    # 200 chars cut off message.errorCode — the only field that says *why*
-    # (top-level errorCode is null on these workflow errors).
-    text = (getattr(resp, "text", None) or "")[:600]
+    # Keep enough of the body that message.* detail survives — the nested
+    # message.errorCode is the only field that says *why* (top-level errorCode
+    # is null on workflow errors). 600 cut SIGNIN_BAD_REQUEST_ERROR bodies off
+    # right after "heading".
+    text = (getattr(resp, "text", None) or "")[:2500]
     low = text.lower()
     # WAF / bot block signals — escalate, do not fall back to browser.
     if status in (403, 429, 503) and any(
@@ -775,7 +918,17 @@ class FlowState:
         self.sign_in_state: str = ""
         self.user_session_id: str = ""
         self.device_context: dict | None = None
+        # signin SPA stores workflowResponseData.encryptionContextResponse
+        # ({publicKey: JWK, issuer, audience, region}) and uses it to JWE-
+        # encrypt passwords before execute. Captured opportunistically from
+        # any execute response that carries it.
+        self.encryption_context: dict | None = None
         self.auth_code: str = ""
+        # Provenance of auth_code ("<query|fragment>:<host><path>[:<param>]")
+        # — which URL minted it. A value NOT from view.awsapps.com means the
+        # extractor matched a non-portal URL (garbage for the sso-token
+        # exchange).
+        self.auth_code_source: str = ""
         self.sso_state: str = ""
         self.email: str = ""
         self.name: str = ""
@@ -839,6 +992,20 @@ def _signin_execute(
     data = _json_or_empty(r)
     if data.get("workflowStateHandle"):
         st.workflow_state_handle = str(data["workflowStateHandle"])
+    # The SPA stores workflowResponseData.encryptionContextResponse from ANY
+    # execute response and uses it for subsequent password submissions.
+    wrd = data.get("workflowResponseData")
+    if isinstance(wrd, dict) and isinstance(wrd.get("encryptionContextResponse"), dict):
+        st.encryption_context = wrd["encryptionContextResponse"]
+        emit({
+            "event": "debug",
+            "msg": "encryption-context-captured",
+            "stepId": step_id,
+            "has_public_key": "publicKey" in st.encryption_context,
+            "issuer": st.encryption_context.get("issuer"),
+            "audience": st.encryption_context.get("audience"),
+            "region": st.encryption_context.get("region"),
+        })
     return data
 
 
@@ -1333,54 +1500,6 @@ def step_email_entry(s: Any, st: FlowState, email: str) -> None:
             "wall_sleep": True,
         }
     )
-    # Diagnostic: dump collector payload structure key-by-key to find the 50-byte gap.
-    try:
-        from fwcim import build_collector_payload
-
-        diag_payload = build_collector_payload(
-            dwell_ms=submit_dwell,
-            user_agent=UA,
-            location=profile_url,
-            referrer=f"{SIGNIN_BASE}/",
-        )
-        diag_json = json.dumps(diag_payload, separators=(",", ":"))
-        diag_dump = {}
-        for k, v in diag_payload.items():
-            if isinstance(v, str):
-                diag_dump[k] = {"t": "s", "len": len(v)}
-            elif isinstance(v, list):
-                diag_dump[k] = {"t": "l", "len": len(v)}
-            elif isinstance(v, dict):
-                ser_len = len(json.dumps(v, separators=(",", ":")))
-                diag_dump[k] = {"t": "d", "klen": len(v), "ser": ser_len}
-            else:
-                diag_dump[k] = {"t": type(v).__name__, "v": str(v)[:20]}
-        emit(
-            {
-                "event": "debug",
-                "msg": "fp-payload-diagnostic",
-                "payload_len": len(diag_json),
-                "key_count": len(diag_payload),
-                "keys": list(diag_payload.keys()),
-                "detail": diag_dump,
-            }
-        )
-        # Also compute the total if we're missing keys the SPA has
-        # by comparing key sets.
-        diag_keys = set(diag_payload.keys())
-        emit(
-            {
-                "event": "debug",
-                "msg": "fp-payload-version-check",
-                "has_errors": "errors" in diag_keys,
-                "has_metrics": "metrics" in diag_keys,
-                "has_token": "token" in diag_keys,
-                "has_canvas": "canvas" in diag_keys,
-                "has_end": "end" in diag_keys,
-            }
-        )
-    except Exception as dex:
-        emit({"event": "debug", "msg": "fp-diagnostic-error", "error": str(dex)[:200]})
     r2 = _post_json(
         s,
         f"{PROFILE_BASE}/api/send-otp",
@@ -1485,45 +1604,6 @@ def step_create_identity(
             # never log otp/email/fp ciphertext
         }
     )
-    # Diagnostic: dump collector payload structure key-by-key for create-identity.
-    try:
-        from fwcim import build_collector_payload
-
-        # Must mirror the verify_fp call exactly (same form_key AND same
-        # seeded rng); omitting them dumps a payload that was never sent and
-        # reports misleading device fields.
-        diag_payload = build_collector_payload(
-            dwell_ms=verify_dwell,
-            user_agent=UA,
-            location=profile_url,
-            referrer=f"{SIGNIN_BASE}/",
-            form_key="email",
-            rng=random.Random(FP_SEED_CREATE_IDENTITY),
-        )
-        diag_json = json.dumps(diag_payload, separators=(",", ":"))
-        diag_dump = {}
-        for k, v in diag_payload.items():
-            if isinstance(v, str):
-                diag_dump[k] = {"t": "s", "len": len(v)}
-            elif isinstance(v, list):
-                diag_dump[k] = {"t": "l", "len": len(v)}
-            elif isinstance(v, dict):
-                ser_len = len(json.dumps(v, separators=(",", ":")))
-                diag_dump[k] = {"t": "d", "klen": len(v), "ser": ser_len}
-            else:
-                diag_dump[k] = {"t": type(v).__name__, "v": str(v)[:20]}
-        emit(
-            {
-                "event": "debug",
-                "msg": "create-identity-fp-diagnostic",
-                "payload_len": len(diag_json),
-                "key_count": len(diag_payload),
-                "keys": list(diag_payload.keys()),
-                "detail": diag_dump,
-            }
-        )
-    except Exception as dex:
-        emit({"event": "debug", "msg": "create-identity-fp-diag-error", "error": str(dex)[:200]})
     r = _post_json(
         s,
         f"{PROFILE_BASE}/api/create-identity",
@@ -1844,10 +1924,13 @@ def step_password(s: Any, st: FlowState) -> None:
                 if otp_ok and st.auth_code:
                     emit_step("password", "ok")
                     return
-                # OTP step failed or didn't yield authCode — continue the outer loop
-                # to try the signup execute again (may be at a different step)
+                # OTP step failed or didn't yield authCode. The signup workflow
+                # has handed off to the login workflow — its handle is dead, so
+                # retrying the signup endpoint only burns iterations on
+                # INVALID_CSRF_TOKEN (smoke-116 try1: 10× 400). Stop here;
+                # _ensure_user_session may still recover from cookies.
                 emit({"event": "debug", "msg": "password-loop-otp-login-did-not-resolve-authcode"})
-                continue
+                break
 
             # Wait briefly between iterations to avoid hammering
             if i < max_iterations - 1:
@@ -1969,12 +2052,29 @@ def _handle_otp_login_credential(s: Any, st: FlowState, referer: str) -> bool:
                 action_id=action_id,
             )
         except Exception as e:
+            # redact_err truncates at 300 chars — that cut off message.errorCode,
+            # the only field that says *why* (top-level errorCode is null on
+            # workflow errors). Parse the embedded body for the nested error.
+            detail: dict[str, Any] = {"raw": redact_err(e)}
+            m = re.search(r"body=(['\"])(.*)\1\s*$", str(e), re.S)
+            if m:
+                # The body is truncated upstream (_raise_http [:600]) so it is
+                # not parseable JSON — pull the fields out by regex instead.
+                body_text = m.group(2)
+                ec = re.search(r'"errorCode"\s*:\s*"([^"]*)"', body_text)
+                hd = re.search(r'"heading"\s*:\s*"([^"]*)"', body_text)
+                detail = {
+                    "errorCode": ec.group(1) if ec else None,
+                    "heading": hd.group(1) if hd else None,
+                    "has_handle": '"workflowStateHandle"' in body_text,
+                    "body_len": len(body_text),
+                }
             emit({
                 "event": "debug",
                 "msg": "login-exec-error",
                 "stepId": step_id,
                 "action": action_id,
-                "error": redact_err(e),
+                "error": detail,
             })
             return None
 
@@ -1991,7 +2091,11 @@ def _handle_otp_login_credential(s: Any, st: FlowState, referer: str) -> bool:
         return False
     step = str(j.get("stepId") or "start")
 
-    for it in range(8):
+    # Headroom: the post-registration login is start -> get-password ->
+    # (portal redirect | OTP) -> authCode, and each POST consumes one
+    # iteration. range(8) exhausted on the get-password POST itself
+    # (smoke-116 try2) — its response never got processed.
+    for it in range(12):
         for key in ("redirectUrl", "redirect", "location"):
             ru = j.get(key)
             if isinstance(ru, dict):
@@ -1999,7 +2103,14 @@ def _handle_otp_login_credential(s: Any, st: FlowState, referer: str) -> bool:
             if isinstance(ru, str) and ru:
                 _pull_auth_from_url(st, ru)
         if st.auth_code:
-            emit({"event": "debug", "msg": "login-auth-code-obtained", "iteration": it})
+            emit({
+                "event": "debug",
+                "msg": "login-auth-code-obtained",
+                "iteration": it,
+                "auth_code_source": st.auth_code_source,
+                "auth_code_len": len(st.auth_code),
+                "has_sso_state": bool(st.sso_state),
+            })
             return True
 
         emit({"event": "debug", "msg": "login-step", "iteration": it, "stepId": step})
@@ -2007,26 +2118,50 @@ def _handle_otp_login_credential(s: Any, st: FlowState, referer: str) -> bool:
         if step in ("start", "get-identity-user"):
             j = _lex(step, [{"input_type": "UserRequestInput", "username": st.email}, fp_input])
         elif step == "get-password":
-            j = _lex(step, [{"input_type": _PASSWORD_INPUT_TYPE, "password": st.password}])
+            # Login password: the SPA encrypts it with the same
+            # PasswordEncryptor as creation and posts
+            # PasswordRequestInput + successfullyEncrypted + actionId:SUBMIT.
+            # Plaintext 400s (live-verified: SIGNIN_BAD_REQUEST_ERROR,
+            # smoke-116 try2 — the first run ever to reach this branch).
+            ctx = st.encryption_context or {}
+            pk = ctx.get("publicKey") if isinstance(ctx, dict) else None
+            emit({
+                "event": "debug",
+                "msg": "login-password-submit",
+                "has_ctx": bool(st.encryption_context),
+                "ctx_kid": pk.get("kid") if isinstance(pk, dict) else None,
+            })
+            j = _lex(step, [_build_password_input(st.password, st.encryption_context)],
+                     action_id="SUBMIT")
         elif step in (
             "get-new-password-for-password-creation",
             "get-new-password-and-perform-reset-password",
         ):
-            # Password *creation* uses a different input than password login.
-            # SPA (signin_app.js, no-currentPassword branch):
-            #   inputs:[{input_type:"UpdatePasswordRequestInput",
-            #            newPassword, successfullyEncrypted}]  actionId:SUBMIT
-            # We send plaintext over TLS, so successfullyEncrypted is
-            # NOT_APPLICABLE (ENCRYPTION_RESULT_TYPE enum).
-            j = _lex(
-                step,
-                [{
-                    "input_type": "UpdatePasswordRequestInput",
-                    "newPassword": st.password,
-                    "successfullyEncrypted": "NOT_APPLICABLE",
-                }],
-                action_id="SUBMIT",
-            )
+            # Password *creation*. SPA (app.js CreatePasswordPage.ce):
+            #   [resultType, encrypted, errorLog] = await encryptPassword(pw, ctx)
+            #   inputs:[{input_type:"PasswordRequestInput", password: encrypted,
+            #            successfullyEncrypted: resultType, errorLog}]
+            #   actionId:SUBMIT
+            # ctx = encryptionContextResponse captured from an earlier execute
+            # response. Same input type as login (get-password) — the earlier
+            # "different input" theory was disproven live 2026-07-28: login
+            # with plaintext 400s identically. (UpdatePasswordRequestInput/
+            # newPassword is the *change*-password page, which needs
+            # currentPassword — live 400 confirmed it is wrong here.)
+            pw_input = _build_password_input(st.password, st.encryption_context)
+            ctx = st.encryption_context or {}
+            pk = ctx.get("publicKey") if isinstance(ctx, dict) else None
+            emit({
+                "event": "debug",
+                "msg": "password-creation-submit",
+                "encrypted": pw_input.get("successfullyEncrypted"),
+                "newPassword_len": len(str(pw_input.get("password") or "")),
+                "ctx_issuer": ctx.get("issuer"),
+                "ctx_audience": ctx.get("audience"),
+                "ctx_region": ctx.get("region"),
+                "ctx_kid": pk.get("kid") if isinstance(pk, dict) else None,
+            })
+            j = _lex(step, [pw_input], action_id="SUBMIT")
         elif step in ("resume-signup-create-password", "user-signup"):
             # NOT execute steps. The signin SPA maps both to
             # <WorkflowRedirect to={...url}> — posting to them returns 400.
@@ -2063,6 +2198,126 @@ def _handle_otp_login_credential(s: Any, st: FlowState, referer: str) -> bool:
             if q.get("workflowStateHandle"):
                 st.workflow_state_handle = q["workflowStateHandle"][0]
             j = _lex("start", [fp_input])
+        elif step == "end-of-user-registration-success":
+            # Terminal success step. The SPA (SignupWorkflow) maps it to
+            # <WorkflowRedirect to={stepReducer.redirect.url}> — a client-side
+            # navigation, not an execute step (posting → 400). Live-verified:
+            # the redirect chain lands on the SPA's /login shell (state in
+            # query, NO authCode). The workflow handle this response rotated
+            # to is dead — posting `start` with it yields INVALID_CSRF_TOKEN
+            # (CSRF is workflow-scoped). The capture shows the browser
+            # bootstrapping a FRESH login workflow here, so mint one exactly
+            # like the top of this function does.
+            redir = ""
+            if isinstance(j.get("redirect"), dict):
+                redir = str(j["redirect"].get("url") or "")
+            if not redir:
+                redir = str(j.get("redirectUrl") or "")
+            if not redir:
+                emit({
+                    "event": "debug",
+                    "msg": "end-of-registration-redirect-missing",
+                    "body_keys": list(j.keys()),
+                })
+                return False
+            _pull_auth_from_url(st, redir)
+            try:
+                rr = _get(s, redir, headers={"Referer": login_referer}, allow_redirects=True)
+            except Exception as e:
+                emit({"event": "debug", "msg": "end-of-registration-redirect-error", "error": redact_err(e)})
+                return False
+            final_url = getattr(rr, "url", "") or redir
+            _pull_auth_from_url(st, final_url)
+            fp = urlparse(final_url)
+            emit({
+                "event": "debug",
+                "msg": "end-of-registration-redirect-followed",
+                "status": getattr(rr, "status_code", 0),
+                "dest_host": fp.netloc,
+                "dest_path": fp.path,
+                "has_auth_code": bool(st.auth_code),
+                "has_sso_state": bool(st.sso_state),
+            })
+            if st.auth_code:
+                return True
+            # The redirect lands on the SPA's /login route (a static shell).
+            # Mint a fresh post-registration login workflow — same chain as
+            # the top of this function: portal.sso/login → redirectUrl → GET
+            # → handle from the final URL. Reusing any existing handle fails
+            # workflow-scoped CSRF (v1 smoke: INVALID_CSRF_TOKEN).
+            redirect_url = f"{VIEW_BASE}/start/#/device?user_code={st.user_code}"
+            portal_login = (
+                f"{PORTAL_SSO}/login"
+                f"?directory_id=view&redirect_url={_url_quote(redirect_url)}"
+            )
+            try:
+                rp = _get(
+                    s,
+                    portal_login,
+                    headers={"Referer": f"{VIEW_BASE}/", "Accept": "application/json"},
+                )
+                pdata = _json_or_empty(rp)
+            except Exception as e:
+                emit({"event": "debug", "msg": "end-of-registration-mint-error", "error": redact_err(e)})
+                return False
+            if pdata.get("csrfToken"):
+                st.csrf_token = str(pdata["csrfToken"])
+            signin_redirect = str(pdata.get("redirectUrl") or "")
+            if not signin_redirect:
+                emit({"event": "debug", "msg": "end-of-registration-mint-no-redirect",
+                      "status": getattr(rp, "status_code", 0)})
+                return False
+            r3 = _get(s, signin_redirect, headers={"Referer": f"{VIEW_BASE}/"})
+            new_handle = ""
+            for cand in (getattr(r3, "url", "") or "", signin_redirect):
+                q3 = parse_qs(urlparse(cand).query)
+                if q3.get("workflowStateHandle"):
+                    new_handle = q3["workflowStateHandle"][0]
+                    break
+            if not new_handle:
+                emit({"event": "debug", "msg": "end-of-registration-mint-no-handle"})
+                return False
+            st.workflow_state_handle = new_handle
+            login_referer = (
+                f"{SIGNIN_BASE}/platform/{st.directory_id}/login"
+                f"?workflowStateHandle={new_handle}"
+            )
+            emit({"event": "debug", "msg": "end-of-registration-login-minted",
+                  "handle_len": len(new_handle),
+                  "page_status": getattr(r3, "status_code", 0),
+                  "cookie_names": _cookie_names(s)})
+            # Drive the fresh workflow. For an account that just registered the
+            # server may hand back a portal redirect straight away (authCode
+            # in its chain) or ask for the password (get-password) / an email
+            # OTP — return j to the loop so those branches handle it.
+            j = _lex("start", [fp_input])
+            if j is None:
+                return False
+            redir2 = ""
+            if isinstance(j.get("redirect"), dict):
+                redir2 = str(j["redirect"].get("url") or "")
+            if not redir2:
+                redir2 = str(j.get("redirectUrl") or "")
+            if not redir2:
+                emit({"event": "debug", "msg": "end-of-registration-start-no-redirect",
+                      "stepId": j.get("stepId"), "body_keys": list(j.keys())})
+            else:
+                _pull_auth_from_url(st, redir2)
+                try:
+                    rr2 = _get(s, redir2, headers={"Referer": login_referer}, allow_redirects=True)
+                except Exception as e:
+                    emit({"event": "debug", "msg": "end-of-registration-portal-error", "error": redact_err(e)})
+                    return False
+                final2 = getattr(rr2, "url", "") or redir2
+                _pull_auth_from_url(st, final2)
+                fp2 = urlparse(final2)
+                emit({"event": "debug", "msg": "end-of-registration-portal-followed",
+                      "status": getattr(rr2, "status_code", 0),
+                      "dest_host": fp2.netloc, "dest_path": fp2.path,
+                      "has_auth_code": bool(st.auth_code),
+                      "has_sso_state": bool(st.sso_state)})
+                if st.auth_code:
+                    return True
         elif step == "get-email-otp-login-credential":
             # RETRY = "resend the OTP"; it carries no credential input.
             _lex(step, [], action_id="RETRY")
@@ -2083,8 +2338,82 @@ def _handle_otp_login_credential(s: Any, st: FlowState, referer: str) -> bool:
                 }],
                 action_id="SUBMIT",
             )
+        elif step == "end-of-workflow-success":
+            # Terminal step of the (post-registration) LOGIN workflow, reached
+            # after the JWE password is accepted (live-verified 2026-07-28).
+            # The SPA maps it to <WorkflowRedirect to={redirect.url}> — the
+            # portal handoff whose redirect chain mints the authCode. Follow
+            # it; do NOT post `start` (the workflow is complete — its handle
+            # is dead, same as end-of-user-registration-success).
+            redir = ""
+            if isinstance(j.get("redirect"), dict):
+                redir = str(j["redirect"].get("url") or "")
+            if not redir:
+                redir = str(j.get("redirectUrl") or "")
+            if not redir:
+                emit({
+                    "event": "debug",
+                    "msg": "end-of-workflow-redirect-missing",
+                    "body_keys": list(j.keys()),
+                })
+                return False
+            _pull_auth_from_url(st, redir)
+            # Walk the chain hop by hop (allow_redirects=False): curl_cffi
+            # 0.15 exposes no redirect history, and the authCode may ride an
+            # intermediate Location (or its fragment) that a blind follow
+            # would consume invisibly (live run landed on view.awsapps.com
+            # /start/ with has_auth_code=false, no portal.sso cookie set).
+            hops: list[dict] = []
+            cur = redir
+            rr = None
+            for _hop in range(10):
+                try:
+                    rr = _get(s, cur, headers={"Referer": login_referer}, allow_redirects=False)
+                except Exception as e:
+                    hops.append({"url": cur[:200], "error": redact_err(e)})
+                    rr = None
+                    break
+                loc = ""
+                if rr.status_code in (301, 302, 303, 307, 308):
+                    loc = str(rr.headers.get("Location") or "")
+                    if loc and not urlparse(loc).netloc:
+                        base = urlparse(cur)
+                        loc = f"{base.scheme}://{base.netloc}{loc}"
+                _pull_auth_from_url(st, loc)
+                hops.append({
+                    "url": cur[:200],
+                    "status": rr.status_code,
+                    "loc": loc[:200],
+                    "set_cookie": (rr.headers.get("Set-Cookie") or "")[:120],
+                })
+                if not loc:
+                    break
+                cur = loc
+            final_url = cur
+            _pull_auth_from_url(st, final_url)
+            fp = urlparse(final_url)
+            emit({
+                "event": "debug",
+                "msg": "end-of-workflow-redirect-walked",
+                "original": redir[:600],
+                "original_len": len(redir),
+                "hops": hops,
+                "dest_host": fp.netloc,
+                "dest_path": fp.path,
+                "has_auth_code": bool(st.auth_code),
+                "has_sso_state": bool(st.sso_state),
+                "cookie_names": _cookie_names(s),
+            })
+            if st.auth_code:
+                return True
+            return False
         else:
-            emit({"event": "debug", "msg": "login-step-unhandled", "stepId": step})
+            emit({
+                "event": "debug",
+                "msg": "login-step-unhandled",
+                "stepId": step,
+                "body_keys": list(j.keys()),
+            })
             return False
 
         if j is None:
@@ -2149,19 +2478,40 @@ def _log_response_body(r: Any, step_name: str, step_id: str) -> None:
 
 
 def _pull_auth_from_url(st: FlowState, url: str) -> None:
-    qs = parse_qs(urlparse(url).query)
-    if qs.get("authCode"):
-        st.auth_code = qs["authCode"][0]
-    if qs.get("code") and not st.auth_code:
-        st.auth_code = qs["code"][0]
-    if qs.get("state"):
+    pu = urlparse(url)
+    qs = parse_qs(pu.query)
+    host = pu.netloc.lower()
+    # The signin workflow's end-of-workflow redirect hands off to the portal
+    # as view.awsapps.com/start/?workflowResultHandle=<uuid>&state=<KMS blob>;
+    # the portal SPA reads workflowResultHandle from the query and POSTs it to
+    # /auth/sso-token as `authCode` (bundle: getOrchestratorToken,
+    # loggedApiOperation GetTokenFromIDPOrchestratorAuthCode).
+    #
+    # HOST GATE: only the portal handoff host (view.awsapps.com) carries a
+    # real authCode. The signin SPA's own redirects (us-east-1.signin.aws)
+    # also carry `state`/`code`-ish params for its internal navigation, and
+    # the loop-top pull runs on EVERY response's redirectUrl — an ungated
+    # match there bails the login loop early with a garbage authCode that
+    # then 400s the sso-token exchange (smoke-116 try3: auth_code obtained
+    # at iteration 5 with no end-of-workflow-success in the log).
+    is_portal = host == "view.awsapps.com"
+    src = f"{host}{pu.path}"
+    for key in ("authCode", "workflowResultHandle", "code"):
+        if qs.get(key) and not st.auth_code and is_portal:
+            st.auth_code = qs[key][0]
+            st.auth_code_source = f"query:{src}:{key}"
+    # sso_state is portal-handoff state too — the exchange posts it alongside
+    # the authCode. The signin SPA's own `state` is a different opaque blob;
+    # capturing it here would shadow st.sign_in_state in the exchange.
+    if qs.get("state") and is_portal:
         st.sso_state = qs["state"][0]
-    frag = urlparse(url).fragment or ""
-    if "authCode=" in frag or "code=" in frag:
-        m = re.search(r"(?:authCode|code)=([^&]+)", frag)
-        if m:
+    frag = pu.fragment or ""
+    if is_portal and re.search(r"(?:authCode|workflowResultHandle|code)=", frag):
+        m = re.search(r"(?:authCode|workflowResultHandle|code)=([^&]+)", frag)
+        if m and not st.auth_code:
             st.auth_code = unquote(m.group(1))
-    if "state=" in frag and not st.sso_state:
+            st.auth_code_source = f"fragment:{src}"
+    if is_portal and "state=" in frag and not st.sso_state:
         m = re.search(r"state=([^&]+)", frag)
         if m:
             st.sso_state = unquote(m.group(1))
@@ -2178,6 +2528,8 @@ def step_device_confirm(s: Any, st: FlowState) -> None:
         "msg": "device-confirm-diag",
         "has_user_session": bool(st.user_session_id),
         "has_auth_code": bool(st.auth_code),
+        "auth_code_source": st.auth_code_source,
+        "auth_code_len": len(st.auth_code),
         "has_sso_state": bool(st.sso_state),
         "has_sign_in_state": bool(st.sign_in_state),
         "has_csrf_token": bool(st.csrf_token),
@@ -2199,37 +2551,36 @@ def step_device_confirm(s: Any, st: FlowState) -> None:
     st.device_context = data.get("deviceContext") if isinstance(data.get("deviceContext"), dict) else None
     if not st.device_context:
         raise RuntimeError("accept_user_code-missing-deviceContext")
-
-    # associate_token
-    r2 = _post_json(
-        s,
-        f"{OIDC_BASE}/device_authorization/associate_token",
-        {
-            "deviceContext": {
-                "deviceContextId": st.device_context.get("deviceContextId"),
-                "clientId": st.device_context.get("clientId") or OIDC_CLIENT_ID,
-                "clientType": st.device_context.get("clientType") or "public",
-            },
-            "userSessionId": st.user_session_id,
-        },
-        headers={"Referer": f"{VIEW_BASE}/", "Origin": VIEW_BASE},
-    )
-    _raise_http("device_confirm", r2, "associate_token")
+    # NOTE: associate_token is NOT called here. The portal SPA names it
+    # `approveDeviceAuthorization` — it is the consent APPROVAL action that
+    # CONSUMES the user code. Capture order is:
+    #   accept_user_code → consent_details (PENDING) → associate_token (approve)
+    # Calling associate_token before consent_details burns the code and
+    # consent_details then 400s "Invalid user code provided" (smoke-117).
+    # associate_token lives in step_consent, after consent_details.
     emit_step("device_confirm", "ok")
 
 
 def _ensure_user_session(s: Any, st: FlowState) -> None:
     """Populate st.user_session_id via whoAmI and/or sso-token exchange."""
     # whoAmI may already work if password step set session cookies
+    whoami: dict[str, Any] = {}
     try:
         r = _get(
             s,
             f"{PORTAL_SSO}/token/whoAmI",
             headers={
+                # Portal SPA runs on view.awsapps.com — every portal.sso call
+                # is cross-origin from there, so the browser stamps Origin:
+                # view.awsapps.com. _fetch_headers derives it from the TARGET
+                # url (portal.sso.…), which the server rejects: smoke-117
+                # "Origin not allowed: https://portal.sso.us-east-1.amazonaws.com".
+                "Origin": VIEW_BASE,
                 "Referer": f"{VIEW_BASE}/",
                 "Accept": "application/json, text/plain, */*",
             },
         )
+        whoami["status"] = r.status_code
         if r.status_code < 400:
             data = _json_or_empty(r)
             # Capture uses "token" null on whoAmI after auth; session may be cookie-based.
@@ -2237,7 +2588,11 @@ def _ensure_user_session(s: Any, st: FlowState) -> None:
             tok = data.get("token")
             if isinstance(tok, str) and tok:
                 st.user_session_id = tok
-            # Some builds put the session in authorization header echoes — keep going.
+            whoami["has_token"] = bool(tok)
+            whoami["body_keys"] = sorted(data.keys())[:10]
+        else:
+            whoami["body"] = (r.text or "")[:300]
+        # Some builds put the session in authorization header echoes — keep going.
     except Exception as e:
         emit({"event": "debug", "msg": "whoAmI-soft-fail", "error": redact_err(e)})
 
@@ -2245,21 +2600,33 @@ def _ensure_user_session(s: Any, st: FlowState) -> None:
     if not st.user_session_id and st.auth_code:
         try:
             headers = {
+                "Origin": VIEW_BASE,  # cross-origin from the SPA — see whoAmI note
                 "Referer": f"{VIEW_BASE}/",
                 "Accept": "application/json, text/plain, */*",
             }
+            csrf_sent = False
             if st.csrf_token:
                 headers["x-amz-sso-csrf-token"] = st.csrf_token
+                csrf_sent = True
+            state_used = st.sso_state or st.sign_in_state or ""
             r2 = _post_form(
                 s,
                 f"{PORTAL_SSO}/auth/sso-token",
                 {
                     "authCode": st.auth_code,
-                    "state": st.sso_state or st.sign_in_state or "",
+                    "state": state_used,
                     "orgId": "view",
                 },
                 headers=headers,
             )
+            diag: dict[str, Any] = {
+                "status": r2.status_code,
+                "csrf_sent": csrf_sent,
+                "state_source": "sso_state" if st.sso_state else ("sign_in_state" if st.sign_in_state else "empty"),
+                "state_len": len(state_used),
+                "auth_code_len": len(st.auth_code),
+                "auth_code_source": st.auth_code_source,
+            }
             if r2.status_code < 400:
                 data2 = _json_or_empty(r2)
                 tok = data2.get("token")
@@ -2267,6 +2634,17 @@ def _ensure_user_session(s: Any, st: FlowState) -> None:
                     st.user_session_id = tok
                 if data2.get("redirectUrl"):
                     _pull_auth_from_url(st, str(data2["redirectUrl"]))
+                diag["has_token"] = bool(tok)
+                diag["has_redirect_url"] = bool(data2.get("redirectUrl"))
+                diag["init_type"] = data2.get("initType")
+                diag["error_message"] = data2.get("errorMessage")
+            else:
+                # The exchange 400'd SILENTLY in smoke-116 try3 (no else
+                # branch here) — the errorMessage/errorCode in the body is
+                # the only signal for why (stale authCode, wrong state,
+                # csrf). Never swallow this again.
+                diag["body"] = (r2.text or "")[:500]
+            emit({"event": "debug", "msg": "sso-token-exchange", **diag})
         except Exception as e:
             emit({"event": "debug", "msg": "sso-token-soft-fail", "error": redact_err(e)})
 
@@ -2320,6 +2698,27 @@ def step_consent(s: Any, st: FlowState) -> None:
             "clientName": details.get("clientName"),
         }
     )
+
+    # associate_token — the consent APPROVAL (portal SPA names it
+    # approveDeviceAuthorization). Must come AFTER consent_details: it
+    # consumes the user code, so calling it first makes consent_details
+    # 400 "Invalid user code provided" (smoke-117). Capture order is
+    # accept_user_code → consent_details (PENDING) → associate_token.
+    r_assoc = _post_json(
+        s,
+        f"{OIDC_BASE}/device_authorization/associate_token",
+        {
+            "deviceContext": {
+                "deviceContextId": st.device_context.get("deviceContextId"),
+                "clientId": st.device_context.get("clientId") or OIDC_CLIENT_ID,
+                "clientType": st.device_context.get("clientType") or "public",
+            },
+            "userSessionId": st.user_session_id,
+        },
+        headers={"Referer": f"{VIEW_BASE}/", "Origin": VIEW_BASE},
+    )
+    _raise_http("consent", r_assoc, "associate_token")
+    emit({"event": "debug", "msg": "associate-token-ok", "status": r_assoc.status_code})
 
     # Final token exchange (captured as POST {} to vs.aws.amazon.com/token)
     try:
