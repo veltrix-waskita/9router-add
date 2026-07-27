@@ -237,11 +237,16 @@ POST https://profile.aws.amazon.com/api/send-otp
 3. One tempmail add
 4. Confirm logs/dashboard never show secrets
 
-**Status (2026-07-26, smoke-22):** TES resolved — **zero TES blocks** across a full run. The resolution was *not* body-length targeting (that theory is disproven: create-identity sent `body_len=6970`, byte-identical to the capture, and was still BLOCKED; `fp_len` is likewise non-monotonic, 6529 BLOCKED / 6581 PASSED / 6593 BLOCKED; a fresh proxy IP blocked identically). TES scores **device-profile coherence**: the FWCIM RNG seed draws the device identity (`timeZone`, `gpu`, `plugins`, `screenInfo`, `math`, `capabilities`), and a per-step seed fabricated a different device on every request. Fix: `FP_SEED_CREATE_IDENTITY = FP_SEED_SEND_OTP` so both TES-checked requests present one coherent, already-accepted device.
+**Status (2026-07-28, smoke-119): full E2E GREEN.** The pipeline runs entirely over HTTP and returns `result ok:true`: tempmail → bootstrap → email_entry → otp → otp_verify → name → password → device_confirm → consent → done.
 
-Pipeline now reaches: bootstrap → email_entry → otp → otp_verify → name → password (including the nested `get-email-otp-login-credential` OTP round) → device_confirm. `password: ok` is new; the previous best (smoke-18) died at password with an http-400.
+TES scores **device-profile coherence**, not fingerprint size (the body-length theory is disproven: create-identity sent `body_len=6970`, byte-identical to the capture, and was still BLOCKED; `fp_len` is non-monotonic). The FWCIM RNG seed draws the device identity (`timeZone`, `gpu`, `plugins`, `screenInfo`, `math`, `capabilities`); a per-step seed fabricated a different device per request. Fix: one seed per run (`FP_SEED_RUN`, pinnable via `KIRO_FP_SEED`) so every TES-checked request presents one coherent device. TES also saturates environmentally after ~14 signups/2h — rotate IP + device + email domain together (`tmp/smoke-rotate.sh`), never "fix" code in response.
 
-**Open blocker:** `device_confirm` raises `user-session-missing`. The login OTP round completes but sets no `authCode` (`has_auth_code: false`, `has_user_session: false`, no SSO session cookie), so `accept_user_code` has no `userSessionId`. The `authCode → device_confirm → consent` tail remains unverified.
+The `device_confirm → consent` tail that was previously open is resolved:
+
+- `authCode` is the signin workflow's `workflowResultHandle` in the portal redirect (the portal SPA's `getOrchestratorToken` uses it as the authCode; `state` is a KMS blob, not the code). Extractor updated.
+- Post-signup login mints a **fresh** login workflow at `end-of-user-registration-success` — the signup handle is terminal and CSRF is workflow-scoped, so reusing it yields `INVALID_CSRF_TOKEN`.
+- Passwords (creation and login) use the SPA's JWE contract: RSA-OAEP-256 + MGF1-SHA256, A256GCM, `PasswordRequestInput` + `actionId:SUBMIT`.
+- **Consent ordering:** `associate_token` is the APPROVAL that consumes the user code (the portal SPA names it `approveDeviceAuthorization`), so the order is `accept_user_code` → `consent_details` (PENDING) → `associate_token`. Calling it before `consent_details` burned the code and 400'd "Invalid user code provided".
 
 ### Rollout order
 
