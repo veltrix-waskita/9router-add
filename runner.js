@@ -12,7 +12,7 @@
  *
  * Provider capabilities (as implemented today):
  *   - antigravity → Google OAuth only (email + password for Google)
- *   - kiro        → Google (@gmail.com) OR email alias + IMAP OTP (auto by domain)
+ *   - kiro        → email only (pure-HTTP worker; IMAP OTP or temp-mail; no Google OAuth)
  *   - grok-cli    → email signup + IMAP OTP only (pure-HTTP; no Google OAuth yet)
  *
  * Auto-credentials (email method only — grok-cli, kiro email):
@@ -214,12 +214,12 @@ const PROVIDER_INFO = {
   },
   kiro: {
     label: "Kiro AI",
-    methods: ["google", "email"],
+    methods: ["email"],
     notes:
-      "Auto method: @gmail.com → Google OAuth; other domains → email alias (IMAP OTP) or temp-mail. emailSource=imap (default) needs IMAP catch-all; emailSource=tempmail uses disposable inbox.",
-    needsBrowser: true,
+      "Email signup only (pure-HTTP worker; bare @gmail.com not supported — Gmail plus-aliases like you+tag@gmail.com work). emailSource=imap (default) needs IMAP catch-all; emailSource=tempmail uses disposable inbox.",
+    needsBrowser: false,
     needsImap: false, // imap optional since tempmail mode exists
-    needsWorker: false,
+    needsWorker: true,
     needsSolver: false,
     batch: true,
     autoCredentials: true,
@@ -500,8 +500,16 @@ async function stopOwnedSolver() {
   }
 }
 
-function checkGrokWorker() {
-  const workerDir = path.join(__dirname, "src/providers/grok-cli/worker");
+/**
+ * Check a provider's Python pure-HTTP worker (signup.py + venv + curl_cffi).
+ * Each worker-carrying provider keeps its own venv under
+ * src/providers/<name>/worker/.venv (kiro and grok-cli today).
+ *
+ * @param {string} providerName
+ * @returns {{workerDir: string, signup: boolean, venv: boolean, curlCffi: boolean}}
+ */
+function checkWorker(providerName) {
+  const workerDir = path.join(__dirname, "src/providers", providerName, "worker");
   const venvPy = path.join(workerDir, ".venv/bin/python3");
   const signup = path.join(workerDir, "signup.py");
   const out = { workerDir, signup: checkFile(signup), venv: checkFile(venvPy), curlCffi: false };
@@ -565,13 +573,7 @@ async function preflight(config, providerName) {
     }
   } else if (info.needsImap) {
     if (!config.imap || !config.imap.user || !config.imap.password) {
-      if (providerName === "kiro") {
-        warnings.push(
-          "IMAP not set — kiro Google (@gmail.com) still works; email-method accounts will fail."
-        );
-      } else {
-        errors.push("IMAP required (config.imap.user + imap.password) for this provider.");
-      }
+      errors.push("IMAP required (config.imap.user + imap.password) for this provider.");
     } else {
       lines.push(`imap=${config.imap.user}@${config.imap.host || "imap.gmail.com"}`);
     }
@@ -590,18 +592,18 @@ async function preflight(config, providerName) {
     }
   }
 
-  // grok-cli worker
+  // Python pure-HTTP worker (kiro, grok-cli)
   if (info.needsWorker) {
-    const w = checkGrokWorker();
+    const w = checkWorker(providerName);
     if (!w.signup) errors.push(`Missing worker: ${path.join(w.workerDir, "signup.py")}`);
     if (!w.venv) {
       errors.push(
-        `Missing worker venv: ${path.join(w.workerDir, ".venv")} — run: cd src/providers/grok-cli/worker && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
+        `Missing worker venv: ${path.join(w.workerDir, ".venv")} — run: cd src/providers/${providerName}/worker && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
       );
     } else if (!w.curlCffi) {
       errors.push("Worker venv missing curl_cffi — pip install -r requirements.txt inside .venv");
     } else {
-      lines.push("worker=venv+curl_cffi ok");
+      lines.push(`worker=${providerName} venv+curl_cffi ok`);
     }
   }
 
@@ -714,14 +716,29 @@ async function promptSingleAccount(rl, providerName) {
     name = await ask(rl, "Display name (optional)", { defaultValue: "" });
   }
 
-  // Method hint for kiro
+  // Method hint for kiro (email only — pure-HTTP; Google OAuth removed)
   if (providerName === "kiro") {
-    const method = email.toLowerCase().endsWith("@gmail.com") ? "google" : "email";
-    noteLine(`kiro method: ${method}`, "info");
-    if (method === "email" && emailSource !== "tempmail") {
-      noteLine("requires IMAP catch-all that receives this alias", "warn");
-    } else if (method === "email" && emailSource === "tempmail") {
-      noteLine("using temp-mail: no IMAP catch-all needed", "info");
+    const lowerEmail = email.trim().toLowerCase();
+    const isGmail = lowerEmail.endsWith("@gmail.com");
+    // Non-empty tag after "+" required: "user+@gmail.com" normalizes to bare
+    // gmail (the unsupported google path), matching detectMethod/signup.py.
+    const localPart = lowerEmail.split("@", 1)[0];
+    const plusIdx = localPart.indexOf("+");
+    const isPlusAlias = isGmail && plusIdx !== -1 && localPart.slice(plusIdx + 1).length > 0;
+    if (isGmail && !isPlusAlias) {
+      noteLine(
+        "kiro no longer supports bare @gmail.com (pure-HTTP) — use a plus-alias (you+tag@gmail.com), a catch-all alias, or temp-mail",
+        "warn"
+      );
+    } else if (isPlusAlias) {
+      noteLine(
+        "Gmail plus-alias: registers as a distinct account, OTP lands in the base inbox",
+        "info"
+      );
+    } else if (emailSource === "tempmail") {
+      noteLine("kiro uses email signup + temp-mail (no IMAP catch-all needed)", "info");
+    } else {
+      noteLine("kiro uses email signup + IMAP OTP — requires a catch-all that receives this alias", "warn");
     }
   }
   if (providerName === "antigravity") {
@@ -773,15 +790,17 @@ async function promptAutoAccounts(rl, config, providerName) {
     if (!domain) {
       throw new Error(
         `IMAP auto-credentials need providers.${providerName}.aliasDomain in config.json ` +
-          `(e.g. "minom.my.id" with CF Email Routing catch-all → IMAP Gmail). ` +
+          `(e.g. "minom.my.id" with CF Email Routing catch-all → IMAP Gmail, ` +
+          `or "you@gmail.com" for Gmail plus-aliases you+tag@gmail.com). ` +
           `Or use emailSource=tempmail to skip the alias domain requirement.`
       );
     }
+    const plusMode = domain.includes("@");
     showPanel("IMAP ALIAS MODE", [
       tag("Status", "ENABLED", "brightGreen"),
-      tag("Domain", domain, "cyan"),
-      tag("Email", "random alias@domain", "yellow"),
-      tag("OTP", "IMAP catch-all", "yellow"),
+      tag(plusMode ? "Base inbox" : "Domain", domain, "cyan"),
+      tag("Email", plusMode ? "base+<random tag>@gmail.com" : "random alias@domain", "yellow"),
+      tag("OTP", plusMode ? "IMAP (shared base inbox)" : "IMAP catch-all", "yellow"),
     ]);
   }
 
@@ -847,7 +866,8 @@ async function promptAutoAccounts(rl, config, providerName) {
   if (emailSource === "tempmail") {
     resultLines.push(tag("Email", "tempmail@pending.local (runtime)", "dim"));
   } else {
-    resultLines.push(tag("Domain", resolveAliasDomain(config, providerName), "cyan"));
+    const dom = resolveAliasDomain(config, providerName);
+    resultLines.push(tag(dom && dom.includes("@") ? "Base inbox" : "Domain", dom, "cyan"));
     for (const a of accounts) {
       // Email only — password stays in the save file (mode 0600).
       resultLines.push(`  ${style.cyan("·")} ${style.cyan(a.credentials.email)}  ${dim("(" + a.credentials.name + ")")}`);
@@ -1926,7 +1946,7 @@ async function main() {
       {
         value: "kiro",
         label: "kiro",
-        hint: "Google / email alias · IMAP · temp-mail",
+        hint: "email alias / Gmail plus-alias · IMAP · temp-mail",
       },
       {
         value: "grok-cli",
