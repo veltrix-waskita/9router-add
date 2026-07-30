@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import email as emaillib
 from email.utils import getaddresses
+import hashlib
 import html
 import imaplib
 import json
@@ -425,6 +426,46 @@ def _message_for(raw: bytes, target_email: str) -> bool:
     return any(addr.lower() == target for _, addr in getaddresses(headers))
 
 
+# ---- consumed-OTP tracking -------------------------------------------------
+#
+# AWS Builder ID signup has two OTP moments in one worker process: the signup
+# OTP (run() → step_otp) and — post-password — the minted login workflow's
+# get-email-otp-login-credential step (step_otp again, same target_email).
+# Gmail plus-aliases share ONE inbox across aliases, and Gmail EXPUNGE is
+# label-scoped: expunging from INBOX leaves the message searchable in All Mail
+# (whose localized name varies per account locale, so deletion alone cannot
+# guarantee the stale mail is unreachable). Without tracking, the second
+# read_otp re-serves the already-consumed signup code and AWS rejects it with
+# EMAIL_OTP_AUTHENTICATION_FAILED. tempmail's Ncaori.wait_code has the
+# equivalent guard (_seen_ids).
+#
+# Keyed by target_email (lowercased) so distinct aliases sharing one inbox
+# never mask each other; values are sha256 of the fetched RFC822 bytes —
+# message identity, NOT the code value, because AWS may send the same 6-digit
+# code in both mails. Process lifetime == one account run (worker-bridge
+# spawns signup.py per account), so the sets stay bounded to the run's mails.
+_CONSUMED_OTP_KEYS: dict[str, set[str]] = {}
+
+
+def _otp_key(raw: bytes) -> str:
+    """Message-identity key for consumed-OTP tracking (never the code value)."""
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _mark_otp_consumed(target_email: str, raw: bytes) -> None:
+    """Record that raw's code was handed to the caller for target_email."""
+    _CONSUMED_OTP_KEYS.setdefault((target_email or "").strip().lower(), set()).add(
+        _otp_key(raw)
+    )
+
+
+def _was_otp_consumed(target_email: str, raw: bytes) -> bool:
+    """True if raw was already consumed by an earlier read for this target."""
+    return _otp_key(raw) in _CONSUMED_OTP_KEYS.get(
+        (target_email or "").strip().lower(), set()
+    )
+
+
 def read_otp(
     target_email: str,
     cfg: dict,
@@ -435,6 +476,9 @@ def read_otp(
 
     Never logs the code value — only lengths/prose via emit_step.
     Defaults: sender_domain=signin.aws, delay=5s (KIRO).
+
+    Messages whose code was already returned by an earlier read_otp call in
+    this process (same target_email) are skipped — see _CONSUMED_OTP_KEYS.
     """
     host = cfg["host"]
     port = int(cfg["port"])
@@ -465,6 +509,19 @@ def read_otp(
                             if dt and dt[0] and isinstance(dt[0], tuple)
                             else b""
                         )
+                        # Skip mails already consumed by an earlier OTP read
+                        # in this process (see _CONSUMED_OTP_KEYS). Deletion
+                        # cannot guarantee removal: Gmail EXPUNGE is label-
+                        # scoped and All Mail's name is locale-dependent.
+                        if raw and _was_otp_consumed(target_email, raw):
+                            emit(
+                                {
+                                    "event": "debug",
+                                    "msg": "otp-consumed-skip",
+                                    "mailbox": mailbox[:30],
+                                }
+                            )
+                            continue
                         code = extract_otp_from_message(raw)
                         if code:
                             # Recipient check: the FROM-only SEARCH fallback
@@ -480,6 +537,10 @@ def read_otp(
                                 )
                                 continue
                             found = code
+                            # Mark consumed only on a returned code: marking
+                            # gate-rejected mails would break the contract
+                            # (consumed == code handed to the caller).
+                            _mark_otp_consumed(target_email, raw)
                             if delete_after:
                                 try:
                                     m.store(i, "+FLAGS", "\\Deleted")
