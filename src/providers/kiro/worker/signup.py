@@ -338,17 +338,90 @@ def imap_cfg_from_env() -> dict:
     }
 
 
-def _mailboxes_for(host: str) -> list[str]:
-    """Ordered mailboxes to search. Gmail: INBOX + Spam (+ All Mail)."""
+_GMAIL_FALLBACK_MAILBOXES = [
+    "INBOX",
+    '"[Gmail]/Spam"',
+    '"[Google Mail]/Spam"',
+    '"[Gmail]/All Mail"',
+]
+
+
+def _quote_mailbox(name: str) -> str:
+    """IMAP-quote a mailbox name (RFC 3501 9): backslash-escape \\ and "."""
+    return '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _parse_list_entry(entry: bytes) -> tuple[set[str], str] | None:
+    """Parse one IMAP LIST response entry -> (flags, mailbox-name) or None.
+
+    Entry shape (RFC 3501): (\\flags) "delim" name, where name is quoted
+    ("[Gmail]/Semua Email") or a bare atom (INBOX).
+    """
+    try:
+        text = entry.decode(errors="replace") if isinstance(entry, (bytes, bytearray)) else str(entry)
+    except Exception:
+        return None
+    m = re.match(r"\(([^)]*)\)\s+\"[^\"]*\"\s+(.*)$", text.strip())
+    if not m:
+        return None
+    flags = {f.lower() for f in m.group(1).split()}
+    rest = m.group(2).strip()
+    if rest.startswith('"'):
+        qm = re.match(r'"((?:[^"\\]|\\.)*)"', rest)
+        if not qm:
+            return None
+        name = qm.group(1).replace('\\"', '"').replace("\\\\", "\\")
+    else:
+        name = rest.split()[0] if rest.split() else ""
+    return (flags, name) if name else None
+
+
+def _mailboxes_for(host: str, m: imaplib.IMAP4 | None = None) -> list[str]:
+    """Ordered mailboxes to search. Gmail: INBOX + Junk + All Mail.
+
+    Gmail localizes folder names (Indonesian: [Gmail]/Semua Email), so with
+    a live connection resolve the real names via RFC 6154 special-use LIST
+    flags (\\Junk, \\All). Any failure — no connection, LIST error, no
+    special-use flags — falls back to the English hardcoded names, which
+    still work for English-locale accounts.
+    """
     h = (host or "").lower()
-    if h.endswith("gmail.com"):
-        return [
-            "INBOX",
-            '"[Gmail]/Spam"',
-            '"[Google Mail]/Spam"',
-            '"[Gmail]/All Mail"',
-        ]
-    return ["INBOX"]
+    if not h.endswith("gmail.com"):
+        return ["INBOX"]
+    if m is None:
+        return list(_GMAIL_FALLBACK_MAILBOXES)
+    try:
+        typ, data = m.list()
+    except Exception as e:
+        emit(
+            {
+                "event": "debug",
+                "msg": "imap-list-error",
+                "error": str(e)[:100],
+            }
+        )
+        return list(_GMAIL_FALLBACK_MAILBOXES)
+    if typ != "OK" or not data:
+        return list(_GMAIL_FALLBACK_MAILBOXES)
+    junk = allmail = None
+    for entry in data:
+        if not isinstance(entry, (bytes, bytearray)):
+            continue
+        parsed = _parse_list_entry(entry)
+        if not parsed:
+            continue
+        flags, name = parsed
+        if junk is None and "\\junk" in flags:
+            junk = name
+        if allmail is None and "\\all" in flags:
+            allmail = name
+    if not junk and not allmail:
+        return list(_GMAIL_FALLBACK_MAILBOXES)
+    boxes = ["INBOX"]
+    for name in (junk, allmail):
+        if name and name.upper() != "INBOX":
+            boxes.append(_quote_mailbox(name))
+    return boxes
 
 
 def _select_mailbox(m: imaplib.IMAP4, mailbox: str) -> bool:
@@ -487,7 +560,6 @@ def read_otp(
     use_tls = str(cfg.get("tls", "true")).lower() == "true"
     delete_after = str(cfg.get("delete_after_read", "false")).lower() == "true"
     sender_domain = (cfg.get("sender_domain") or "signin.aws").strip() or "signin.aws"
-    mailboxes = _mailboxes_for(host)
     t0 = time.time()
     for attempt in range(retries):
         emit_step("otp", "pending", attempt=attempt + 1, elapsed_s=int(time.time() - t0))
@@ -495,6 +567,9 @@ def read_otp(
             m = imaplib.IMAP4_SSL(host, port) if use_tls else imaplib.IMAP4(host, port)
             try:
                 m.login(user, pw)
+                # Resolve locale-dependent Gmail names per connection via
+                # RFC 6154 LIST (#131); English fallback when LIST fails.
+                mailboxes = _mailboxes_for(host, m)
                 found = None
                 selected_any = False
                 for mailbox in mailboxes:

@@ -164,6 +164,178 @@ class TestBareGmailGuard(unittest.TestCase):
         self.assertFalse(is_bare_gmail(None))
 
 
+# ---- #131: locale-dependent Gmail mailbox names (RFC 6154 special-use) ----
+#
+# _mailboxes_for used to hardcode English names ("[Gmail]/All Mail"). Gmail
+# localizes folder names per account locale — the live account is Indonesian
+# (All Mail = "[Gmail]/Semua Email"), so 38 selects failed per read_otp and
+# All Mail was never searched. The fix resolves the real names via RFC 6154
+# LIST flags (\Junk, \All) on the live connection, with the English names as
+# fallback whenever LIST is unavailable or yields nothing.
+
+
+class FakeListIMAP:
+    """Minimal stand-in exposing only .list(), the surface #131 touches."""
+
+    def __init__(self, typ="OK", data=None, raise_exc=None):
+        self._typ = typ
+        self._data = data
+        self._raise = raise_exc
+
+    def list(self):
+        if self._raise:
+            raise self._raise
+        return (self._typ, self._data)
+
+
+# Real imaplib bytes for an Indonesian-locale Gmail account (probe #3 live
+# evidence): localized All Mail + Spam, plus INBOX as a bare atom.
+_ID_LIST = [
+    b'(\\HasNoChildren) "/" "INBOX"',
+    b'(\\HasNoChildren \\All) "/" "[Gmail]/Semua Email"',
+    b'(\\HasNoChildren \\Junk) "/" "[Gmail]/Spam"',
+    b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Tong Sampah"',
+]
+
+
+class TestMailboxesFor(unittest.TestCase):
+    """_mailboxes_for: RFC 6154 special-use resolution with English fallback."""
+
+    def test_non_gmail_inbox_only(self):
+        # Non-gmail hosts never get Gmail folders — with or without a conn.
+        self.assertEqual(signup._mailboxes_for("imap.test"), ["INBOX"])
+        self.assertEqual(
+            signup._mailboxes_for("imap.test", FakeListIMAP(data=_ID_LIST)),
+            ["INBOX"],
+        )
+
+    def test_gmail_no_connection_fallback(self):
+        self.assertEqual(
+            signup._mailboxes_for("imap.gmail.com"),
+            [
+                "INBOX",
+                '"[Gmail]/Spam"',
+                '"[Google Mail]/Spam"',
+                '"[Gmail]/All Mail"',
+            ],
+        )
+
+    def test_gmail_indonesian_locale_resolved(self):
+        # The live bug shape: localized names must replace the English ones.
+        self.assertEqual(
+            signup._mailboxes_for("imap.gmail.com", FakeListIMAP(data=_ID_LIST)),
+            ["INBOX", '"[Gmail]/Spam"', '"[Gmail]/Semua Email"'],
+        )
+
+    def test_gmail_english_locale_resolved(self):
+        en = [
+            b'(\\HasNoChildren) "/" "INBOX"',
+            b'(\\HasNoChildren \\Junk) "/" "[Gmail]/Spam"',
+            b'(\\HasNoChildren \\All) "/" "[Gmail]/All Mail"',
+        ]
+        self.assertEqual(
+            signup._mailboxes_for("imap.gmail.com", FakeListIMAP(data=en)),
+            ["INBOX", '"[Gmail]/Spam"', '"[Gmail]/All Mail"'],
+        )
+
+    def test_gmail_list_raises_fallback(self):
+        conn = FakeListIMAP(raise_exc=OSError("connection reset"))
+        self.assertEqual(
+            signup._mailboxes_for("imap.gmail.com", conn),
+            [
+                "INBOX",
+                '"[Gmail]/Spam"',
+                '"[Google Mail]/Spam"',
+                '"[Gmail]/All Mail"',
+            ],
+        )
+
+    def test_gmail_list_bad_typ_fallback(self):
+        conn = FakeListIMAP(typ="NO", data=[b"permission denied"])
+        self.assertEqual(
+            signup._mailboxes_for("imap.gmail.com", conn),
+            [
+                "INBOX",
+                '"[Gmail]/Spam"',
+                '"[Google Mail]/Spam"',
+                '"[Gmail]/All Mail"',
+            ],
+        )
+
+    def test_gmail_no_special_use_flags_fallback(self):
+        # A server that answers LIST without RFC 6154 flags must not yield
+        # INBOX-only (which would silently drop Spam/All Mail coverage).
+        conn = FakeListIMAP(data=[b'(\\HasNoChildren) "/" "[Gmail]/Semua Email"'])
+        self.assertEqual(
+            signup._mailboxes_for("imap.gmail.com", conn),
+            [
+                "INBOX",
+                '"[Gmail]/Spam"',
+                '"[Google Mail]/Spam"',
+                '"[Gmail]/All Mail"',
+            ],
+        )
+
+    def test_gmail_partial_flags_inbox_deduped(self):
+        # Only \All advertised; a buggy \All->INBOX mapping must not duplicate.
+        conn = FakeListIMAP(
+            data=[
+                b'(\\HasNoChildren \\All) "/" "INBOX"',
+                b'(\\HasNoChildren) "/" "[Gmail]/Semua Email"',
+            ]
+        )
+        self.assertEqual(
+            signup._mailboxes_for("imap.gmail.com", conn),
+            ["INBOX"],
+        )
+
+    def test_gmail_list_none_entries_fallback(self):
+        # imaplib pads untagged responses with None — must not crash.
+        conn = FakeListIMAP(data=[None, b'(\\HasNoChildren \\All) "/" "[Gmail]/Semua Email"', None])
+        self.assertEqual(
+            signup._mailboxes_for("imap.gmail.com", conn),
+            ["INBOX", '"[Gmail]/Semua Email"'],
+        )
+
+    def test_gmail_case_insensitive_host(self):
+        self.assertEqual(
+            signup._mailboxes_for("IMAP.GMAIL.COM", FakeListIMAP(data=_ID_LIST)),
+            ["INBOX", '"[Gmail]/Spam"', '"[Gmail]/Semua Email"'],
+        )
+
+
+class TestQuoteMailbox(unittest.TestCase):
+    def test_plain_name(self):
+        self.assertEqual(signup._quote_mailbox("[Gmail]/Semua Email"), '"[Gmail]/Semua Email"')
+
+    def test_embedded_quote_and_backslash_escaped(self):
+        self.assertEqual(signup._quote_mailbox('a"b\\c'), '"a\\"b\\\\c"')
+
+
+class TestParseListEntry(unittest.TestCase):
+    def test_quoted_name_with_flags(self):
+        self.assertEqual(
+            signup._parse_list_entry(b'(\\HasNoChildren \\All) "/" "[Gmail]/Semua Email"'),
+            ({"\\hasnochildren", "\\all"}, "[Gmail]/Semua Email"),
+        )
+
+    def test_bare_atom_name(self):
+        self.assertEqual(
+            signup._parse_list_entry(b'(\\HasNoChildren) "/" INBOX'),
+            ({"\\hasnochildren"}, "INBOX"),
+        )
+
+    def test_escaped_quote_in_name(self):
+        self.assertEqual(
+            signup._parse_list_entry(b'(\\All) "/" "a\\"b"'),
+            ({"\\all"}, 'a"b'),
+        )
+
+    def test_garbage_returns_none(self):
+        self.assertIsNone(signup._parse_list_entry(b"not a list entry"))
+        self.assertIsNone(signup._parse_list_entry(b'(\\All) "/" '))
+
+
 # ---- consumed-OTP regression (stale signup code re-served at login OTP) ----
 #
 # AWS Builder ID signup has two OTP moments in one worker process: the signup
