@@ -2,12 +2,16 @@
 
 /**
  * Auto-generate account credentials for email-method providers
- * (grok-cli, kiro email). Uses Cloudflare catch-all aliases on a
- * user-owned domain + strong random password + realistic name.
+ * (grok-cli, kiro email). Two alias modes, selected by the aliasDomain
+ * value, + strong random password + realistic name:
+ *   - Catch-all domain ("minom.my.id"): CF Email Routing catch-all →
+ *     IMAP Gmail. aliasDomain = bare domain.
+ *   - Gmail plus-alias ("you@gmail.com"): you+<random tag>@gmail.com —
+ *     all mail lands in you@gmail.com's inbox, no catch-all domain
+ *     needed. aliasDomain = full gmail address.
  *
  * Prerequisites:
- *   - aliasDomain in provider config (e.g. minom.my.id)
- *   - CF Email Routing catch-all → IMAP Gmail
+ *   - aliasDomain in provider config (bare domain or full gmail address)
  *   - IMAP credentials in config (OTP delivery)
  */
 
@@ -90,7 +94,8 @@ function generateAccounts({
   if (!domain) {
     throw new Error(
       `Auto-credentials need providers.${providerName}.aliasDomain in config.json ` +
-        `(e.g. "minom.my.id" with CF Email Routing catch-all).`
+        `(e.g. "minom.my.id" with CF Email Routing catch-all, or "you@gmail.com" ` +
+        `for Gmail plus-aliases you+tag@gmail.com).`
     );
   }
   const n = Math.max(1, Math.min(Number(count) || 1, 500));

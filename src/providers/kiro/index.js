@@ -66,17 +66,31 @@ class KiroProvider extends BaseProvider {
   /**
    * Choose the registration method based on the email domain.
    *
+   * Bare @gmail.com needs Google OAuth (unsupported in pure-HTTP v1).
+   * Plus-aliased gmail (base+tag@gmail.com) registers as a distinct AWS
+   * account while delivering to the base inbox — that is the "email" method.
+   *
    * @param {string} [email] - Account email.
-   * @returns {"google"|"email"} "google" for @gmail.com, otherwise "email".
+   * @returns {"google"|"email"} "google" for bare @gmail.com, otherwise "email".
    */
   detectMethod(email) {
     if (!email) return "email";
-    return email.toLowerCase().endsWith("@gmail.com") ? "google" : "email";
+    // Trim to match the Python worker (signup.py strips KIRO_EMAIL) so Node
+    // pre-rejects exactly what the worker would reject — no wasted device code.
+    const lower = String(email).trim().toLowerCase();
+    if (!lower.endsWith("@gmail.com")) return "email";
+    // base+tag@gmail.com → email method (plus-alias); bare gmail → google.
+    // A non-empty tag after "+" is required: "user+@gmail.com" has an empty
+    // tag, which Gmail normalizes to bare "user@gmail.com" (the google path).
+    const local = lower.split("@", 1)[0];
+    const plusIdx = local.indexOf("+");
+    const hasTag = plusIdx !== -1 && local.slice(plusIdx + 1).length > 0;
+    return hasTag ? "email" : "google";
   }
 
   /**
    * Run the full signup flow:
-   * 1. Validate method (google is not supported in pure-HTTP v1).
+   * 1. Validate method (bare gmail/google is not supported in pure-HTTP v1).
    * 2. Validate credentials and config.
    * 3. GET device code from 9router.
    * 4. Spawn the Python pure-HTTP worker (signup + device authorize).
@@ -90,9 +104,9 @@ class KiroProvider extends BaseProvider {
   async add(credentials = {}, options = {}) {
     const method = this.detectMethod(credentials.email);
 
-    // Google accounts are not supported in pure-HTTP v1.
+    // Bare gmail needs Google OAuth (unsupported); plus-aliases use email.
     if (method === "google") {
-      throw new AuthError("Google / @gmail.com accounts are not supported in pure-HTTP v1");
+      throw new AuthError("Google / bare @gmail.com accounts are not supported in pure-HTTP v1 (plus-aliases like you+tag@gmail.com work)");
     }
 
     const emailSource = (options && options.emailSource) || "imap";

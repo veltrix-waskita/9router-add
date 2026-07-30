@@ -70,6 +70,26 @@ describe("generateAccounts", () => {
     assert.strictEqual(ledger.length, 3);
   });
 
+  it("plus-mode: full gmail aliasDomain emits base+tag@gmail.com", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cred-"));
+    const saveFile = path.join(dir, "out.json");
+    const aliasFile = path.join(dir, "aliases.txt");
+    const { accounts, domain } = generateAccounts({
+      config: { providers: { kiro: { aliasDomain: "base@gmail.com" } } },
+      providerName: "kiro",
+      count: 3,
+      saveFile,
+      aliasFile,
+    });
+    assert.strictEqual(domain, "base@gmail.com");
+    assert.strictEqual(accounts.length, 3);
+    for (const a of accounts) {
+      assert.match(a.credentials.email, /^base\+[a-z0-9]{12}@gmail\.com$/);
+    }
+    const ledger = fs.readFileSync(aliasFile, "utf8").trim().split("\n");
+    assert.strictEqual(ledger.length, 3);
+  });
+
   it("throws without aliasDomain", () => {
     assert.throws(
       () =>

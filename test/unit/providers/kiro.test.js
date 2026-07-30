@@ -71,15 +71,47 @@ describe("KiroProvider.detectMethod", () => {
     assert.strictEqual(p.detectMethod(undefined), "email");
   });
 
-  it("@gmail.com returns google", () => {
+  it("bare @gmail.com returns google", () => {
     const p = makeProvider(makeConfig());
     assert.strictEqual(p.detectMethod("user@gmail.com"), "google");
     assert.strictEqual(p.detectMethod("USER@GMAIL.COM"), "google");
   });
 
+  it("plus-aliased @gmail.com returns email", () => {
+    const p = makeProvider(makeConfig());
+    assert.strictEqual(p.detectMethod("user+tag123@gmail.com"), "email");
+    assert.strictEqual(p.detectMethod("USER+TAG@GMAIL.COM"), "email");
+  });
+
+  it("empty plus-tag @gmail.com returns google (Gmail strips a trailing +)", () => {
+    // "user+@gmail.com" has an empty tag; Gmail normalizes it to bare
+    // "user@gmail.com", which is the unsupported google path.
+    const p = makeProvider(makeConfig());
+    assert.strictEqual(p.detectMethod("user+@gmail.com"), "google");
+    assert.strictEqual(p.detectMethod("USER+@GMAIL.COM"), "google");
+  });
+
+  it("whitespace-padded bare @gmail.com returns google (worker trims KIRO_EMAIL)", () => {
+    // signup.py strips KIRO_EMAIL, so Node must trim too or a padded bare
+    // gmail would pass Node and die mid-worker with google-not-supported-v1.
+    const p = makeProvider(makeConfig());
+    assert.strictEqual(p.detectMethod("user@gmail.com "), "google");
+    assert.strictEqual(p.detectMethod("  user@gmail.com"), "google");
+  });
+
+  it("whitespace-padded plus-alias still returns email", () => {
+    const p = makeProvider(makeConfig());
+    assert.strictEqual(p.detectMethod(" user+tag@gmail.com "), "email");
+  });
+
   it("@outlook.com returns email", () => {
     const p = makeProvider(makeConfig());
     assert.strictEqual(p.detectMethod("user@outlook.com"), "email");
+  });
+
+  it("plus-alias on a custom domain returns email", () => {
+    const p = makeProvider(makeConfig());
+    assert.strictEqual(p.detectMethod("user+tag@minom.my.id"), "email");
   });
 });
 
@@ -89,6 +121,35 @@ describe("KiroProvider.add validation", () => {
     const result = await p.add({ email: "user@gmail.com", password: "pw" }, {});
     assert.strictEqual(result.ok, false);
     assert.ok(/Google.*pure-HTTP/i.test(result.error));
+  });
+
+  it("plus-aliased @gmail.com passes the google guard (imap mode)", async () => {
+    const p = makeProvider(makeConfig());
+    p._apiCall = async (method) => {
+      if (method === "GET") {
+        return {
+          device_code: "dc",
+          user_code: "uc",
+          verification_uri_complete: "https://example.test/device",
+          expires_in: 60,
+          interval: 0.001,
+          _clientId: "cid",
+          _clientSecret: "cs",
+          _region: "us-east-1",
+          _authMethod: "email",
+          _startUrl: "https://start.example.com",
+        };
+      }
+      return { success: true, connection: { id: "c" } };
+    };
+    p._runSignupWorker = async () => {};
+    p.renameConnection = async () => ({});
+    const result = await p.add(
+      { email: "base+k3x9f2a7b1c4@gmail.com", password: "pw" },
+      {}
+    );
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(p._accountEmail, "base+k3x9f2a7b1c4@gmail.com");
   });
 
   it("imap mode requires email+password", async () => {

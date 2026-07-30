@@ -29,3 +29,29 @@ describe("randomLocalPart", () => {
     assert.ok(!cf.randomLocalPart().includes("@"));
   });
 });
+
+describe("randomTag", () => {
+  it("should default to 12 chars of lowercase a-z0-9", () => {
+    const tag = cf.randomTag();
+    assert.strictEqual(tag.length, 12);
+    assert.match(tag, /^[a-z0-9]{12}$/);
+  });
+  it("should honor a custom length", () => {
+    assert.strictEqual(cf.randomTag(6).length, 6);
+    assert.match(cf.randomTag(6), /^[a-z0-9]{6}$/);
+  });
+});
+
+describe("generateAliases plus-mode (full address argument)", () => {
+  it("should emit base+tag@host when given a full gmail address", () => {
+    const aliases = cf.generateAliases("tauvindpwtuba@gmail.com", 4);
+    assert.strictEqual(aliases.length, 4);
+    for (const a of aliases) {
+      assert.match(a, /^tauvindpwtuba\+[a-z0-9]{12}@gmail\.com$/);
+    }
+  });
+  it("should not produce duplicate tags in one batch", () => {
+    const aliases = cf.generateAliases("base@gmail.com", 50);
+    assert.strictEqual(new Set(aliases).size, 50);
+  });
+});

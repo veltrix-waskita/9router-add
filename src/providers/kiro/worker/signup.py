@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import email as emaillib
+from email.utils import getaddresses
 import html
 import imaplib
 import json
@@ -403,6 +404,27 @@ def _search_ids(m: imaplib.IMAP4, target_email: str, sender_domain: str) -> list
     return ids
 
 
+def _message_for(raw: bytes, target_email: str) -> bool:
+    """True if raw RFC822 message is addressed to target_email (To/Cc).
+
+    Gmail plus-aliases (base+tag@gmail.com) all share one inbox, and the
+    FROM-only SEARCH fallback in _search_ids ignores the recipient entirely
+    — without this check a code meant for another alias (or a stale code
+    from an earlier run) would be accepted. Exact address match via
+    getaddresses (not substring) so "xbase+tag@gmail.com" never matches
+    "base+tag@gmail.com"; display names and comma lists are handled too.
+    """
+    try:
+        msg = emaillib.message_from_bytes(raw)
+    except Exception:
+        return False
+    target = (target_email or "").strip().lower()
+    if not target:
+        return False
+    headers = (msg.get_all("To") or []) + (msg.get_all("Cc") or [])
+    return any(addr.lower() == target for _, addr in getaddresses(headers))
+
+
 def read_otp(
     target_email: str,
     cfg: dict,
@@ -445,6 +467,18 @@ def read_otp(
                         )
                         code = extract_otp_from_message(raw)
                         if code:
+                            # Recipient check: the FROM-only SEARCH fallback
+                            # (and shared plus-alias inboxes) can surface a
+                            # code addressed to a different alias.
+                            if not _message_for(raw, target_email):
+                                emit(
+                                    {
+                                        "event": "debug",
+                                        "msg": "otp-recipient-mismatch",
+                                        "mailbox": mailbox[:30],
+                                    }
+                                )
+                                continue
                             found = code
                             if delete_after:
                                 try:
@@ -2745,6 +2779,25 @@ def step_consent(s: Any, st: FlowState) -> None:
 # ---- run() -----------------------------------------------------------------
 
 
+def is_bare_gmail(email: str) -> bool:
+    """True if email is a bare @gmail.com address (needs Google OAuth, unsupported).
+
+    Plus-aliases (base+tag@gmail.com) are allowed: they register as distinct
+    AWS accounts but deliver to the base inbox for OTP reads. A non-empty tag
+    after "+" is required: "user+@gmail.com" has an empty tag, which Gmail
+    normalizes to bare "user@gmail.com" (the google path).
+
+    Mirrors KiroProvider.detectMethod in index.js — keep both in sync.
+    """
+    lower_email = (email or "").strip().lower()
+    if not lower_email.endswith("@gmail.com"):
+        return False
+    local_part = lower_email.split("@", 1)[0]
+    plus_idx = local_part.find("+")
+    has_tag = plus_idx != -1 and len(local_part[plus_idx + 1:]) > 0
+    return not has_tag
+
+
 def run() -> int:
     email = (os.getenv("KIRO_EMAIL") or "").strip()
     password = os.getenv("KIRO_PASSWORD") or ""
@@ -2759,8 +2812,8 @@ def run() -> int:
     if email_source != "tempmail" and not email:
         emit_result(False, error="missing-required-env", step="init")
         return 1
-    # Hard reject gmail in worker too (belt + Node check)
-    if email.lower().endswith("@gmail.com"):
+    # Hard reject bare gmail in worker too (belt + Node check).
+    if is_bare_gmail(email):
         emit_result(False, error="google-not-supported-v1", step="init")
         return 1
 

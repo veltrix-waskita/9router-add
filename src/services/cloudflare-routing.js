@@ -20,6 +20,7 @@
 // This module generates a random local-part and appends it to aliases.txt.
 // The IMAP bot just reads Gmail — no API call to CF on the hot path.
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -60,11 +61,41 @@ function randomLocalPart() {
   return `${first.slice(0, 4)}${last.slice(0, 2)}${num}`;
 }
 
-// Generate N random aliases on a domain. Local-part uses the name-like format
-// (see randomLocalPart).
+// Plus-alias tag for Gmail subaddressing (base+tag@gmail.com). 12 chars of
+// lowercase a-z0-9 via crypto.randomInt (~51.9 bits) — collision-proof at
+// batch sizes ≤500, and lowercase so IMAP SEARCH / AWS form validation /
+// Gmail normalization never disagree on case. The tag is not a secret
+// (account security comes from the random password); it only needs to be
+// unique per base inbox.
+const TAG_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+/** @param {number} [len=12] @returns {string} */
+function randomTag(len = 12) {
+  let out = "";
+  for (let i = 0; i < len; i++) {
+    out += TAG_ALPHABET[crypto.randomInt(TAG_ALPHABET.length)];
+  }
+  return out;
+}
+
+// Generate N random aliases. Two modes, selected by the argument shape:
+// - Catch-all domain ("minom.my.id"): name-like local-part
+//   → emma.walker37@minom.my.id (CF Email Routing catch-all forwards).
+// - Full address ("you@gmail.com"): Gmail plus-alias
+//   → you+k3x9f2a7b1c4@gmail.com (all mail lands in you@gmail.com's inbox;
+//   no catch-all domain needed).
 /** @param {string} domain @param {number} [count=1] @returns {Array<string>} */
 function generateAliases(domain, count = 1) {
   const out = [];
+  if (domain.includes("@")) {
+    const at = domain.lastIndexOf("@");
+    const local = domain.slice(0, at);
+    const host = domain.slice(at + 1);
+    for (let i = 0; i < count; i++) {
+      out.push(`${local}+${randomTag()}@${host}`);
+    }
+    return out;
+  }
   for (let i = 0; i < count; i++) {
     out.push(`${randomLocalPart()}@${domain}`);
   }
@@ -96,6 +127,7 @@ function appendAliasesToFile(filePath, aliases) {
 
 module.exports = {
   randomLocalPart,
+  randomTag,
   generateAliases,
   appendAliasesToFile,
 };
