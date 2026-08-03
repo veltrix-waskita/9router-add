@@ -238,6 +238,19 @@ const PROVIDER_INFO = {
     autoCredentials: true,
     supportsTempmail: true,
   },
+  pateway: {
+    label: "Pateway (AI farm)",
+    methods: ["farm"],
+    notes:
+      "pateway.ai mass registration farm (standalone, browser-based). " +
+      "Spawns workbase pateway_farm.py. Requires local solver :8877 (aliyun).",
+    needsBrowser: true,
+    needsWorker: false,
+    needsSolver: true,
+    batch: true,
+    autoCredentials: false,
+    supportsTempmail: false,
+  },
 };
 
 // Providers that can invent email+password (need catch-all alias domain).
@@ -625,6 +638,21 @@ async function preflight(config, providerName) {
         `Turnstile solver not on :8877 (${sol.error}) — ok for this provider.`
       );
     }
+  }
+
+  // pateway farm delegation (standalone workbase farm)
+  if (providerName === "pateway") {
+    const farmDir = "/home/elzanom/work/tools/pateway-farm";
+    const farmPy = path.join(farmDir, "pateway_farm.py");
+    const farmVenv = path.join(farmDir, ".venv", "bin", "python3");
+    if (!checkFile(farmPy)) errors.push(`Missing farm: ${farmPy}`);
+    if (!checkFile(farmVenv)) {
+      errors.push(`Missing farm venv: ${farmVenv} — run: cd ${farmDir} && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`);
+    } else {
+      lines.push(`farm=${farmDir} venv ok`);
+    }
+    const sol = await probeSolver(8877, 3000);
+    if (!sol.ok) errors.push(`Solver :8877 not reachable — start farm solver (cd ${farmDir}/solver && python3 universal_solver.py)`);
   }
 
   // Proxy file (optional)
@@ -1689,6 +1717,40 @@ async function buildApi(config) {
   return api;
 }
 
+/**
+ * Delegate to the standalone pateway farm. Runs the workbase farm's
+ * pateway_farm.py with its own .config.json/.state.json + venv; streams
+ * output through the dashboard; returns a summary on exit.
+ * @param {object} config - resolved config
+ * @param {string} providerName - "pateway"
+ */
+async function runPatewayFarm(config, providerName) {
+  const { execFile } = require("child_process");
+  const farmDir = "/home/elzanom/work/tools/pateway-farm";
+  const farmPy = path.join(farmDir, "pateway_farm.py");
+  const venvPy = path.join(farmDir, ".venv", "bin", "python3");
+  return new Promise((resolve) => {
+    const child = execFile(
+      venvPy,
+      [farmPy],
+      { cwd: farmDir, env: { ...process.env }, timeout: 0 },
+      (err, stdout, stderr) => {
+        const text = [stdout, stderr].filter(Boolean).join("\n");
+        const ok = !err;
+        if (APP) {
+          try { APP.note(ok ? "farm selesai" : `farm gagal: ${shortError(text)}`, ok ? "ok" : "fail"); } catch {}
+        }
+        resolve({ ok, log: text });
+      }
+    );
+    // Stream output to dashboard if APP is live
+    if (APP) {
+      child.stdout.on("data", (d) => { try { APP.note(String(d), "dim"); } catch {} });
+      child.stderr.on("data", (d) => { try { APP.note(String(d), "dim"); } catch {} });
+    }
+  });
+}
+
 async function runAccounts(config, api, providerName, accounts) {
   const providers = loadProviders(config, api);
   const Provider = providers[providerName];
@@ -1953,6 +2015,11 @@ async function main() {
         label: "grok-cli",
         hint: "email + IMAP OTP / temp-mail (pure-HTTP)",
       },
+      {
+        value: "pateway",
+        label: "pateway",
+        hint: "pateway.ai farm · browser · needs solver :8877",
+      },
     ]);
     const info = PROVIDER_INFO[providerName];
     APP.setMeta({ provider: providerName, mode: config.mode });
@@ -2082,7 +2149,11 @@ async function main() {
     // 6) Execute (reuses same APP shell)
     APP.setStep("run");
     const api = await buildApi(config);
-    await runAccounts(config, api, providerName, accounts);
+    if (providerName === "pateway") {
+      await runPatewayFarm(config, providerName);
+    } else {
+      await runAccounts(config, api, providerName, accounts);
+    }
   } finally {
     await stopOwnedSolver();
     if (APP) {
