@@ -448,15 +448,66 @@ function probeSolver(port = 8877, timeoutMs = 1500) {
 }
 
 /**
+ * Health-poll :8877 until it answers (or attempts are exhausted).
+ * Solver boot takes ~10-14s (Camoufox pool) — the farm's first solve would
+ * otherwise hit the dead window. Returns the first successful probe result
+ * or the last failure.
+ * @param {number} attempts - max polls (e.g. 5)
+ * @param {number} intervalMs - delay between polls (e.g. 3000)
+ */
+async function waitSolverReady(attempts = 5, intervalMs = 3000) {
+  let last = { ok: false, error: "not probed" };
+  for (let i = 0; i < attempts; i++) {
+    last = await probeSolver(8877, 3000);
+    if (last.ok) return last;
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return last;
+}
+
+/**
+ * Read the farm's .state.json + accounts.jsonl for the final summary.
+ * Best-effort: missing/unreadable files yield zeros.
+ * @param {string} farmDir
+ * @returns {{ok: number, fail: number, attempt: number, accounts: number}}
+ */
+function readFarmSummary(farmDir) {
+  const out = { ok: 0, fail: 0, attempt: 0, accounts: 0 };
+  try {
+    const st = JSON.parse(fs.readFileSync(path.join(farmDir, ".state.json"), "utf8"));
+    out.ok = Number(st.ok) || 0;
+    out.fail = Number(st.fail) || 0;
+    out.attempt = Number(st.attempt) || 0;
+  } catch {}
+  try {
+    const data = fs.readFileSync(path.join(farmDir, "accounts.jsonl"), "utf8");
+    out.accounts = data.split("\n").filter((l) => l.trim()).length;
+  } catch {}
+  return out;
+}
+
+/**
  * Ensure local Turnstile solver is up on :8877.
  * - If something already answers → reuse (do not own → will not stop).
  * - Else spawn captcha-solver/ via captchaSolver.start and mark owned.
  * Soft-fail: returns { ok, owned, error? } so non-grok providers can continue.
+ * @param {string} [providerName] - when "pateway", never spawn: the farm solver
+ *   is standalone and must be started by the operator first (see preflight).
  */
-async function ensureSolverStarted() {
+async function ensureSolverStarted(providerName) {
   const existing = await probeSolver(8877);
   if (existing.ok) {
     return { ok: true, owned: false, reused: true, status: existing.status };
+  }
+
+  // pateway never owns the solver — an external one (farm's universal_solver.py)
+  // is required, and preflight hard-errors with start instructions if absent.
+  if (providerName === "pateway") {
+    return {
+      ok: false,
+      owned: false,
+      error: "external solver required (pateway) — start farm solver first",
+    };
   }
 
   if (!checkFile(path.join(SOLVER_DIR, "server.py"))) {
@@ -622,6 +673,10 @@ async function preflight(config, providerName) {
 
   // Turnstile solver — runner always tries ensureSolverStarted() before preflight.
   // Here we only re-probe; if still down, hard-error only when provider needs it.
+  // pateway never spawns the solver — it requires an external farm solver (:8877).
+  // An owned solver (spawned at boot for grok-cli) would be a conflict: the farm
+  // aliyun solves run in subprocesses of the solver's venv and need the farm's
+  // universal_solver.py + aliyun/ tree, which the repo copy may not match.
   {
     const sol = await probeSolver(8877);
     if (sol.ok) {
@@ -651,8 +706,25 @@ async function preflight(config, providerName) {
     } else {
       lines.push(`farm=${farmDir} venv ok`);
     }
-    const sol = await probeSolver(8877, 3000);
-    if (!sol.ok) errors.push(`Solver :8877 not reachable — start farm solver (cd ${farmDir}/solver && python3 universal_solver.py)`);
+    // Solver is REQUIRED (aliyun solves go through it) and must be EXTERNAL —
+    // the runner never owns/spawns a solver for pateway. Health-poll up to 15s
+    // so the 10-14s solver-start dead window doesn't hit the farm's first solve.
+    const sol = await waitSolverReady(5, 3000);
+    if (!sol.ok) {
+      errors.push(
+        `Solver :8877 not ready after 15s — start farm solver first ` +
+          `(cd ${farmDir}/solver && python3 universal_solver.py)`
+      );
+    } else if (solverOwned) {
+      // The runner spawned :8877 at boot (grok-cli). That solver is a conflict
+      // for the farm's aliyun raw mode — it needs the farm's own solver copy.
+      errors.push(
+        `Solver :8877 is runner-owned — start the farm solver instead ` +
+          `(stop the runner's solver, then cd ${farmDir}/solver && python3 universal_solver.py)`
+      );
+    } else {
+      lines.push(`solver=:8877 http=${sol.status} (external)`);
+    }
   }
 
   // Proxy file (optional)
@@ -1729,18 +1801,29 @@ async function runPatewayFarm(config, providerName) {
   const farmDir = "/home/elzanom/work/tools/pateway-farm";
   const farmPy = path.join(farmDir, "pateway_farm.py");
   const venvPy = path.join(farmDir, ".venv", "bin", "python3");
-  return new Promise((resolve) => {
+
+  // Health-poll :8877 first — the solver takes ~10-14s to start (Camoufox pool),
+  // and the farm's first solve would otherwise hit that dead window and burn a
+  // fail. Preflight already waits up to 15s; this re-checks right before spawn.
+  const sol = await waitSolverReady(5, 3000);
+  if (!sol.ok) {
+    const log = `solver :8877 not ready after 15s`;
+    if (APP) { try { APP.note(log, "fail"); } catch {} }
+    return { ok: false, log };
+  }
+
+  const summary = await new Promise((resolve) => {
     const child = execFile(
       venvPy,
       [farmPy],
-      { cwd: farmDir, env: { ...process.env }, timeout: 0 },
+      { cwd: farmDir, env: { ...process.env }, timeout: 0, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout, stderr) => {
         const text = [stdout, stderr].filter(Boolean).join("\n");
-        const ok = !err;
-        if (APP) {
-          try { APP.note(ok ? "farm selesai" : `farm gagal: ${shortError(text)}`, ok ? "ok" : "fail"); } catch {}
-        }
-        resolve({ ok, log: text });
+        // err.killed means WE killed it (timeout/control), not a farm verdict —
+        // surface state.json counts as the outcome instead.
+        const killed = !!(err && err.killed);
+        const ok = !err && !killed;
+        resolve({ ok, log: text, killed });
       }
     );
     // Stream output to dashboard if APP is live
@@ -1749,6 +1832,25 @@ async function runPatewayFarm(config, providerName) {
       child.stderr.on("data", (d) => { try { APP.note(String(d), "dim"); } catch {} });
     }
   });
+
+  // Surface the farm's own tallies from .state.json + accounts.jsonl.
+  const st = readFarmSummary(farmDir);
+  if (APP) {
+    try {
+      if (summary.killed) {
+        APP.note(
+          `farm killed (SIGTERM) · ok=${st.ok} fail=${st.fail} attempt=${st.attempt} accounts=${st.accounts}`,
+          "warn"
+        );
+      } else {
+        APP.note(
+          `farm: ok=${st.ok} fail=${st.fail} attempt=${st.attempt} accounts=${st.accounts}`,
+          summary.ok ? "ok" : "fail"
+        );
+      }
+    } catch {}
+  }
+  return { ...summary, state: st };
 }
 
 async function runAccounts(config, api, providerName, accounts) {
@@ -2150,7 +2252,8 @@ async function main() {
     APP.setStep("run");
     const api = await buildApi(config);
     if (providerName === "pateway") {
-      await runPatewayFarm(config, providerName);
+      const farm = await runPatewayFarm(config, providerName);
+      APP.setWork(farm.ok ? "farm selesai" : "farm gagal");
     } else {
       await runAccounts(config, api, providerName, accounts);
     }

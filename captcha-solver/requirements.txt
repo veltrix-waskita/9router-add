@@ -3,6 +3,14 @@ uvicorn>=0.27.0
 pydantic>=2.0.0
 loguru>=0.7.0
 camoufox[geoip]>=0.4.0
+# server-side / free solvers (math/text/image OCR + slider via opencv)
+opencv-python>=4.9.0
+numpy>=1.26.0
+Pillow>=10.0.0
+pytesseract>=0.3.10
+onnxruntime>=1.17.0
+# cloakbrowser: hcaptcha dual-engine (needs a valid CLOAK_LICENSE_KEY for more than free tier)
+cloakbrowser>=0.5.0
 # optional free solvers
 # pytesseract
 # opencv-python-headless
