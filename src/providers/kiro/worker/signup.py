@@ -469,13 +469,39 @@ def _select_mailbox(m: imaplib.IMAP4, mailbox: str) -> bool:
 
 
 def _search_ids(m: imaplib.IMAP4, target_email: str, sender_domain: str) -> list:
-    """SEARCH for candidate message ids. Caller must be in SELECTED state."""
-    typ, data = m.search(None, f'(TO "{target_email}" FROM "{sender_domain}")')
-    ids = data[0].split() if typ == "OK" and data and data[0] else []
+    """SEARCH for candidate message ids. Caller must be in SELECTED state.
+
+    sender_domain may be a single domain or a comma-separated list. kiro's
+    login OTP comes from login.awsapps.com while the signup OTP comes from
+    signin.aws — searching only one misses the other (task #133: 3 login
+    OTPs sat in Spam unread because the search was FROM signin.aws).
+    """
+    domains = [d.strip() for d in sender_domain.split(",") if d.strip()] or ["signin.aws"]
+    ids: list[bytes] = []
+    for dom in domains:
+        try:
+            typ, data = m.search(None, f'(TO "{target_email}" FROM "{dom}")')
+            got = data[0].split() if typ == "OK" and data and data[0] else []
+            ids.extend(got)
+        except Exception:
+            pass
     if not ids:
-        typ, data = m.search(None, f'(FROM "{sender_domain}")')
-        ids = data[0].split() if typ == "OK" and data and data[0] else []
-    return ids
+        # FROM-only fallback (recipient checked later in _message_for).
+        for dom in domains:
+            try:
+                typ, data = m.search(None, f'(FROM "{dom}")')
+                got = data[0].split() if typ == "OK" and data and data[0] else []
+                ids.extend(got)
+            except Exception:
+                pass
+    # de-dup preserving order
+    seen: set[bytes] = set()
+    out: list[bytes] = []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
 
 
 def _message_for(raw: bytes, target_email: str) -> bool:
@@ -559,7 +585,13 @@ def read_otp(
     pw = cfg["password"]
     use_tls = str(cfg.get("tls", "true")).lower() == "true"
     delete_after = str(cfg.get("delete_after_read", "false")).lower() == "true"
-    sender_domain = (cfg.get("sender_domain") or "signin.aws").strip() or "signin.aws"
+    # Both AWS OTP senders: signup code = signin.aws, login code =
+    # login.awsapps.com. Searching only one left login OTPs unread in Spam
+    # (task #133).
+    sender_domain = (
+        cfg.get("sender_domain")
+        or "signin.aws,login.awsapps.com"
+    ).strip() or "signin.aws,login.awsapps.com"
     t0 = time.time()
     for attempt in range(retries):
         emit_step("otp", "pending", attempt=attempt + 1, elapsed_s=int(time.time() - t0))
