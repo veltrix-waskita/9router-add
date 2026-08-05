@@ -8,6 +8,7 @@
 // the boundary, embedded in GROK_SIGNIN_URL.
 
 const { spawn } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 const { ProviderError } = require("../../base/errors");
 
@@ -224,6 +225,18 @@ function runSignupWorker({ command, args, env, cwd, onEvent = () => {}, timeoutM
       while ((idx = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, idx);
         buf = buf.slice(idx + 1);
+        // Opt-in raw capture: the interactive runner condenses each step to a
+        // one-liner, which hides the diagnostic fields on the event (e.g.
+        // device_consent's approve_soft/verify). Set WORKER_RAW_LOG=<path> to
+        // keep the untouched JSONL for debugging. The worker already redacts
+        // secrets before emitting.
+        if (process.env.WORKER_RAW_LOG) {
+          try {
+            fs.appendFileSync(process.env.WORKER_RAW_LOG, line + "\n");
+          } catch {
+            /* diagnostics must never break the run */
+          }
+        }
         const parsed = parseWorkerLine(line);
         if (parsed.kind === "skip") continue;
         if (parsed.kind === "result") lastResult = parsed;

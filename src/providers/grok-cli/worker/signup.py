@@ -1191,6 +1191,28 @@ class XaiSession:
             "len": len(html_body),
         }
 
+        # What principal does this page actually offer? A successful token
+        # carries a team_id, and the approve POST hardcodes principal_type=User
+        # — if xAI now expects a Team principal (or the account has no team),
+        # approve returns 200/device-done but the token exchange answers
+        # invalid_grant "Access denied". Emit shape only, never the ids.
+        try:
+            _low = html_body.lower()
+            emit({
+                "event": "debug",
+                "msg": "consent_principals",
+                "principal_types": sorted(set(re.findall(
+                    r'principal_type["\']?\s*[:=]\s*["\']?(\w+)', html_body))),
+                "principal_id_fields": len(re.findall(
+                    r'name=["\']principal_id["\']', html_body)),
+                "mentions_team": "team" in _low,
+                "team_id_present": bool(re.search(r'team_?id', html_body, re.I)),
+                "mentions_workspace": "workspace" in _low,
+                "consent_len": len(html_body),
+            })
+        except Exception as e:
+            emit({"event": "debug", "msg": "consent_principals_error", "error": str(e)[:120]})
+
         user_id, source = resolve_principal_id(
             consent_html=html_body,
             cookies=self.s.cookies,
@@ -1254,6 +1276,66 @@ class XaiSession:
             )
             emit_step("device_consent", "fail", error=result["error"])
             return result
+
+        # 3b) The consent page carries its own principal_id hidden input, and
+        # that value is authoritative: it is what the server rendered for THIS
+        # signed-in session and THIS user_code. resolve_principal_id() puts
+        # `known` (cached from createUser) first, so whenever the cache is
+        # populated the page's value is never even read — approving for a
+        # principal the grant does not belong to. The server still answers
+        # 200 -> /device/done, and only the later token exchange rejects it
+        # with invalid_grant "Access denied", which is why this looked like a
+        # 9router problem. Prefer the page; fall back to the resolved id.
+        # The page is a ~120KB Next.js RSC document, so principal_id lives in
+        # the flight JSON, not an <input> tag — use the full pattern set.
+        page_uid = extract_user_id_from_text(html_body)
+        emit({
+            "event": "debug",
+            "msg": "principal_compare",
+            "page_uid_found": bool(page_uid),
+            "chosen_source": source,
+            "matches_chosen": bool(page_uid) and page_uid == user_id,
+        })
+        if page_uid and page_uid != user_id:
+            emit({
+                "event": "debug",
+                "msg": "principal_override",
+                "from_source": source,
+                "to_source": "consent_page",
+            })
+            user_id, source = page_uid, "consent_page"
+        result["principal_source"] = source
+
+        # 3c) Entitlement probe. The approve below succeeds (200 -> /device/done)
+        # and the principal is verified correct, yet the token exchange answers
+        # invalid_grant "Access denied" — xAI's own error_description, so the
+        # grant is refused server-side rather than mis-sent. A token that DID
+        # work (2026-07-24) carries a team_id, and this worker never creates or
+        # joins a team. Record what the account page says about team/plan so
+        # the hypothesis can be settled from a log instead of guessed at.
+        try:
+            racc = self.s.get(
+                ACCOUNT_URL,
+                headers=self._headers({"Accept": "text/html"}),
+                **self._req_kw(timeout=30, allow_redirects=True),
+            )
+            acc = racc.text or ""
+            acc_l = acc.lower()
+            emit({
+                "event": "debug",
+                "msg": "account_entitlement",
+                "status": racc.status_code,
+                "url": str(racc.url)[:120],
+                "len": len(acc),
+                "mentions_team": "team" in acc_l,
+                "mentions_workspace": "workspace" in acc_l,
+                "team_uuid_found": bool(re.search(r'team_?id["\']?\s*[:=]\s*["\']?' + _UUID, acc, re.I)),
+                "mentions_subscribe": "subscribe" in acc_l or "subscription" in acc_l,
+                "mentions_free": "free" in acc_l,
+                "mentions_verify": "verify" in acc_l or "verification" in acc_l,
+            })
+        except Exception as e:
+            emit({"event": "debug", "msg": "account_entitlement_error", "error": str(e)[:120]})
 
         # 4) approve form POST
         approve_url = "https://auth.x.ai/oauth2/device/approve"
@@ -1323,6 +1405,41 @@ class XaiSession:
         except Exception as e:
             result["done"] = {"error": str(e)[:120]}
 
+        # 6) verify a SOFT approval actually took.
+        #
+        # approve_soft fires whenever the response merely fails to look like an
+        # error page, which is a guess, not a confirmation — and the token
+        # endpoint then answers `invalid_grant / Access denied` (note: NOT
+        # authorization_pending, i.e. the grant was rejected outright, so the
+        # approve POST did not register). Re-fetch the consent page: if it
+        # still offers the approve form, the device is not authorized.
+        # Only ever downgrades the guess — hard signals above are left alone.
+        if result.get("approved") and result.get("approve_soft"):
+            try:
+                rv = self.s.get(
+                    f"{DEVICE_CONSENT_URL}?user_code={user_code}",
+                    headers=self._headers({"Accept": "text/html"}),
+                    **self._req_kw(timeout=30, allow_redirects=True),
+                )
+                vb = (rv.text or "").lower()
+                still_pending = (
+                    "device/approve" in vb
+                    or 'name="user_code"' in vb
+                    or 'value="allow"' in vb
+                )
+                result["verify"] = {
+                    "status": rv.status_code,
+                    "url": str(rv.url)[:160],
+                    "still_pending": still_pending,
+                }
+                if still_pending:
+                    result["approved"] = False
+                    result["error"] = (
+                        "approve-not-effective: consent page still pending after allow"
+                    )
+            except Exception as e:
+                result["verify"] = {"error": str(e)[:120]}
+
         result["cookies"] = self._cookie_names()
         emit_step(
             "device_consent",
@@ -1330,6 +1447,13 @@ class XaiSession:
             approved=bool(result.get("approved")),
             principal_id=user_id,
             principal_source=source,
+            # Surfaced so a run can be diagnosed without the full worker log:
+            # "approved" alone hid whether it was confirmed or merely guessed.
+            approve_soft=bool(result.get("approve_soft")),
+            approve_status=(result.get("approve") or {}).get("status"),
+            approve_url=(result.get("approve") or {}).get("url"),
+            verify=result.get("verify"),
+            error=result.get("error"),
         )
         return result
 

@@ -682,6 +682,32 @@ def redact_err(err: BaseException | str) -> str:
     return s
 
 
+def _safe_body_snapshot(data: Any) -> dict:
+    """Redaction-safe summary of an /api/execute response body for debug emit.
+
+    Strings truncated to 120 chars, nested dict values collapsed to their type
+    name unless short strings, lists to their first 20 elements. actionIdList
+    etc. are workflow action names, not secrets — collapsing them to "list"
+    would hide the server's own contract; long opaque tokens
+    (workflowStateHandle) survive only as a 120-char prefix.
+    """
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for k, v in data.items():
+        if isinstance(v, str):
+            out[k] = v[:120] if len(v) > 120 else v
+        elif isinstance(v, bool | int | float | None):
+            out[k] = v
+        elif isinstance(v, dict):
+            out[k] = {sk: sv if isinstance(sv, str) and len(sv) < 80 else str(type(sv).__name__) for sk, sv in v.items()}
+        elif isinstance(v, list):
+            out[k] = [sv if isinstance(sv, str) and len(sv) < 80 else str(type(sv).__name__) for sv in v[:20]]
+        else:
+            out[k] = str(type(v).__name__)
+    return out
+
+
 # ---- URL / browser-data helpers --------------------------------------------
 
 
@@ -2054,21 +2080,7 @@ def step_password(s: Any, st: FlowState) -> None:
             next_step_id = data.get("stepId")
 
             body_keys = list(data.keys())
-            safe_vals = {}
-            for k in body_keys:
-                v = data[k]
-                if isinstance(v, str):
-                    safe_vals[k] = v[:120] if len(v) > 120 else v
-                elif isinstance(v, bool | int | float | None):
-                    safe_vals[k] = v
-                elif isinstance(v, dict):
-                    safe_vals[k] = {sk: sv if isinstance(sv, str) and len(sv) < 80 else str(type(sv).__name__) for sk, sv in v.items()}
-                elif isinstance(v, list):
-                    # actionIdList etc. are workflow action names, not secrets —
-                    # collapsing them to "list" hid the server's own contract.
-                    safe_vals[k] = [sv if isinstance(sv, str) and len(sv) < 80 else str(type(sv).__name__) for sv in v[:20]]
-                else:
-                    safe_vals[k] = str(type(v).__name__)
+            safe_vals = _safe_body_snapshot(data)
 
             emit({
                 "event": "debug",
@@ -2490,7 +2502,20 @@ def _handle_otp_login_credential(s: Any, st: FlowState, referer: str) -> bool:
                     return True
         elif step == "get-email-otp-login-credential":
             # RETRY = "resend the OTP"; it carries no credential input.
-            _lex(step, [], action_id="RETRY")
+            rj = _lex(step, [], action_id="RETRY")
+            # #133 forensics: the RETRY body is the sole unobserved datum in
+            # the plus-alias login-OTP non-delivery (Risk #3) — capture it.
+            # Snapshot semantics match password-execute-loop-ok so CONTROL vs
+            # PLUS bodies diff apples-to-apples; ok=false records a thrown
+            # RETRY (_lex already emitted login-exec-error with the detail).
+            emit({
+                "event": "debug",
+                "msg": "login-retry-response",
+                "stepId": step,
+                "ok": rj is not None,
+                "body_len": len(json.dumps(rj)) if rj is not None else None,
+                "body_snapshot": _safe_body_snapshot(rj),
+            })
             time.sleep(2.0)
             try:
                 code = step_otp(st.email, st.email_source, box=st.tempmail_box)
