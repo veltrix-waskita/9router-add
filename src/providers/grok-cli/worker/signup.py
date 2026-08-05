@@ -583,7 +583,17 @@ def discover_next_action(session: Any, page_url: str = SIGNUP_URL) -> str:
     createUserAndSession in the same chunk.
     """
     try:
-        r = session.get(page_url, **{"timeout": 30})
+        # xAI CF blocks a plain GET without browser-like headers + TLS
+        # impersonate (403 "Attention Required" / 5.8KB stub) — mirror the
+        # bootstrap request: UA + Accept + impersonate.
+        ua = getattr(session, "ua", None) or UA_FALLBACK
+        imp = getattr(session, "impersonate", None) or "chrome131"
+        r = session.get(
+            page_url,
+            headers={"User-Agent": ua, "Accept": "text/html"},
+            impersonate=imp,
+            **{"timeout": 30},
+        )
         html = r.text or ""
     except Exception as e:
         emit({"event": "debug", "msg": "discover_action_page_fail", "error": str(e)[:100]})
@@ -591,7 +601,7 @@ def discover_next_action(session: Any, page_url: str = SIGNUP_URL) -> str:
 
     srcs = list(
         dict.fromkeys(
-            re.findall(r'(?:src|href)=["\'](/_next/static/[^"\']+\.js)["\']', html)
+            re.findall(r'/_next/static/[^"\']+\.js', html)
         )
     )
     # Prefer chunks that also mention createUserAndSession; fall back to any ref.
@@ -599,7 +609,12 @@ def discover_next_action(session: Any, page_url: str = SIGNUP_URL) -> str:
     fallback: list[str] = []
     for src in srcs:
         try:
-            jr = session.get("https://accounts.x.ai" + src, **{"timeout": 30})
+            jr = session.get(
+                "https://accounts.x.ai" + src,
+                headers={"User-Agent": ua, "Accept": "*/*"},
+                impersonate=imp,
+                **{"timeout": 30},
+            )
             text = jr.text or ""
         except Exception:
             continue
