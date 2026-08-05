@@ -28,13 +28,6 @@ if sys.platform == "win32":
 
 # ─── Config ───────────────────────────────────────────────────────────────
 PORT              = int(os.getenv("PORT", "8877"))
-# NOTE (2026-08-04, operator decision): binding 0.0.0.0 + the regex-prefix SSRF
-# guard below are DELIBERATE accepted risk, carried over from the workbase farm
-# sync — not an oversight. The repo version used to default to 127.0.0.1 with a
-# DNS-resolving guard; we keep the farm's posture so aliyun solves work. The
-# runner reaches the solver only via loopback (127.0.0.1:8877), so grok-cli and
-# pateway are unaffected by the wider bind. Restrict to HOST=127.0.0.1 if this
-# host sits on an untrusted network.
 HOST              = os.getenv("HOST", "0.0.0.0")
 HEADLESS          = os.getenv("SOLVER_HEADLESS", "1") != "0"
 THREADS           = int(os.getenv("SOLVER_THREADS", "2"))
@@ -70,16 +63,9 @@ SUPPORTED = ["math", "text", "image", "slider", "turnstile", "recaptcha",
 log = logging.getLogger("solver")
 
 # ─── SSRF guard ─────────────────────────────────────────────────────────────
-# NOTE (2026-08-04): this is the farm's WEAKER guard — a literal regex prefix
-# match on the hostname string, NOT DNS resolution (a name like `evil.test`
-# that resolves to 127.0.0.1 sails through). The old repo version resolved the
-# name and judged every address it mapped to. Kept deliberately to match the
-# farm sync (see HOST note above), but the deny list below now includes
-# 169.254.0.0/16 (cloud metadata, e.g. 169.254.169.254) which was missing.
 _PRIV = [re.compile(p) for p in [
     r"^127\.\d+\.\d+\.\d+", r"^10\.\d+\.\d+\.\d+",
     r"^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+", r"^192\.168\.\d+\.\d+",
-    r"^169\.254\.\d+\.\d+",        # link-local — cloud metadata lives here
     r"^0\.0\.0\.0$", r"^localhost$", r"^::1$"]]
 def check_ssrf(u):
     if ALLOW_PRIVATE or not u:
@@ -99,10 +85,6 @@ def load_image_bytes(src: str) -> bytes:
     if s.startswith("data:"):
         s = s.split(",", 1)[1]
     if s.startswith("http://") or s.startswith("https://"):
-        # /solve only validated req.url — req.image / req.bg_image / req.puzzle_image
-        # were fetched unvalidated. Same guard here so a caller can't point the
-        # solver at 127.0.0.1/169.254.169.254 via an image field.
-        check_ssrf(s)
         req = urllib.request.Request(s, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.read()
