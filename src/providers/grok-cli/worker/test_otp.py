@@ -267,11 +267,17 @@ class EmailBoxUnitTests(unittest.TestCase):
             box.wait_code(timeout=1)
 
     def test_create_account_all_fail(self):
+        from unittest import mock
         from tempmail import EmailBox
+        # Both providers fail → RuntimeError. Deterministic: monkeypatch the
+        # provider factory so no network is touched (the old test depended on
+        # ncaori/zoromail being down, which flaked when they were up).
         box = EmailBox(prefer=["ncaori", "zoromail"])
-        # Both will fail on network — no monkeypatch needed for coverage.
-        with self.assertRaises(RuntimeError):
-            box.create_account()
+        with mock.patch.object(
+            box, "_make", side_effect=RuntimeError("network down (mocked)")
+        ):
+            with self.assertRaises(RuntimeError):
+                box.create_account()
 
 
 if __name__ == "__main__":
