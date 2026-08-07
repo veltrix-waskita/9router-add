@@ -50,6 +50,10 @@ function redactSecrets(text) {
  * Qoder provider — automates Qoder (qoder.com) AI coding account registration
  * + Personal Access Token (PAT) generation.
  *
+ * Config: providers.qoder.solverUrl overrides the Aliyun solver endpoint
+ * (default http://127.0.0.1:8877/solve); accountsDir relocates the PAT
+ * sidecar files (default process.cwd()).
+ *
  * Architecture: Node orchestrates; a Python pure-HTTP worker
  * (worker/signup.py, subprocess-per-run) drives register + OTP + PAT via
  * curl_cffi Chrome 131 impersonation. No browser, no nodriver, no puppeteer.
@@ -105,7 +109,7 @@ class QoderProvider extends BaseProvider {
    * 3. Parse the worker JSONL result; return {ok, connection}.
    *
    * @param {{email?: string, password?: string, name?: string}} [credentials={}] - Account credentials.
-   * @param {{proxy?: object|string, emailSource?: string, signupUrl?: string}} [options={}] - Run options.
+   * @param {{proxy?: object|string, emailSource?: string, signupUrl?: string, solverUrl?: string}} [options={}] - Run options.
    * @returns {Promise<{ok: boolean, connection?: object}>}
    */
   async add(credentials = {}, options = {}) {

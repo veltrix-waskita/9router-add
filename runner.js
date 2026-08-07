@@ -1704,6 +1704,10 @@ async function buildApi(config) {
 
 async function runAccounts(config, api, providerName, accounts) {
   const providers = loadProviders(config, api);
+  const solverUrl =
+    (config.solver && config.solver.url) ||
+    process.env.QODER_SOLVER_URL ||
+    "http://127.0.0.1:8877/solve";
   const Provider = providers[providerName];
   if (!Provider) throw new Error(`Provider not loaded: ${providerName}`);
 
@@ -1759,7 +1763,12 @@ async function runAccounts(config, api, providerName, accounts) {
       // Fresh provider + services per account (matches cli batch semantics).
       const provider = new Provider(baseConfig, api, loadServices(baseConfig));
       try {
-        const result = await provider.add(credentials, options || {});
+        const result = await provider.add(credentials, {
+          ...(options || {}),
+          // Point qoder's worker at the (runner-owned or external) solver so
+          // the aliyun captcha solves even when :8877 was spawned by us.
+          solverUrl,
+        });
         if (result && result.skip) {
           summary.skip += 1;
           dash.finishAccount("skip", result.reason || "skipped");

@@ -93,6 +93,16 @@ function buildWorkerEnv({ credentials = {}, config = {}, options = {} }) {
     PURE_HTTP: "1",
   };
 
+  // Local Aliyun solver for the register-step captcha. Wire the node-side
+  // override (config / options) so the runner's managed solver and config
+  // solver.url flow through; worker defaults to 127.0.0.1:8877.
+  env.QODER_SOLVER_URL = String(
+    (options && options.solverUrl) ||
+      providerCfg.solverUrl ||
+      process.env.QODER_SOLVER_URL ||
+      "http://127.0.0.1:8877/solve"
+  );
+
   // IMAP env vars only for imap mode (mirrors the kiro bridge). The worker's
   // imap_otp.read_otp fails fast when user/password are empty, so config.imap
   // must be wired through for the QODER_EMAIL_SOURCE=imap path to work at all.
