@@ -16,13 +16,13 @@ test("qoder provider registers name + endpoints", () => {
 
 test("parseWorkerLine keeps result payload (pat/email survive round-trip)", () => {
   const parsed = parseWorkerLine(
-    JSON.stringify({ kind: "result", ok: true, step: "register2", pat: "pt-x", email: "a@b" })
+    JSON.stringify({ kind: "result", ok: true, step: "register2", pat: "pt-testdummy-d34db33f", email: "a@b" })
   );
   assert.strictEqual(parsed.kind, "result");
   assert.strictEqual(parsed.ok, true);
   assert.strictEqual(parsed.step, "register2");
   assert.ok(parsed.payload, "result line must carry the full payload for the provider");
-  assert.strictEqual(parsed.payload.pat, "pt-x");
+  assert.strictEqual(parsed.payload.pat, "pt-testdummy-d34db33f");
   assert.strictEqual(parsed.payload.email, "a@b");
 });
 
@@ -85,8 +85,11 @@ test("add() captures the worker's tempmail address for the connection email", as
     onEvent(parseWorkerLine(
       JSON.stringify({ event: "step", step: "tempmail_create", status: "ok", address: "iron@nca.my.id" })
     ));
+    // The fake PAT flows through add() → afterAdd(), which appends it to the
+    // real qoder-pats.txt/qoder-accounts.txt sidecars — so use a dummy value
+    // that could never be mistaken for a live credential.
     onEvent(parseWorkerLine(
-      JSON.stringify({ kind: "result", ok: true, step: "register2", email: "iron@nca.my.id", pat: "pt-x", name: "Nexus" })
+      JSON.stringify({ kind: "result", ok: true, step: "register2", email: "iron@nca.my.id", pat: "pt-testdummy-d34db33f", name: "Nexus" })
     ));
   };
   const origLog = console.log;
@@ -98,7 +101,7 @@ test("add() captures the worker's tempmail address for the connection email", as
     );
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.connection.email, "iron@nca.my.id");
-    assert.strictEqual(result.connection.data.apiKey, "pt-x");
+    assert.strictEqual(result.connection.data.apiKey, "pt-testdummy-d34db33f");
   } finally {
     console.log = origLog;
   }
