@@ -114,7 +114,7 @@ function buildWorkerEnv({ credentials = {}, config = {}, options = {} }) {
 /**
  * Classify one stdout line from the worker.
  * @param {string} line
- * @returns {{kind:'skip'}|{kind:'debug',raw:string}|{kind:'event',event:string,payload:object}|{kind:'result',ok:boolean,error:string|null,step:string|null}}
+ * @returns {{kind:'skip'}|{kind:'debug',raw:string}|{kind:'event',event:string,payload:object}|{kind:'result',ok:boolean,error:string|null,step:string|null,payload:object}}
  */
 function parseWorkerLine(line) {
   const s = String(line).trim();
@@ -133,6 +133,9 @@ function parseWorkerLine(line) {
         ok: !!obj.ok,
         error: obj.error || null,
         step: obj.step || null,
+        // Full worker payload survives (pat, email, name, ...) so the
+        // provider can consume result fields (qoder add() reads result.pat).
+        payload: obj,
       };
     }
     if (typeof obj.event === "string") {
