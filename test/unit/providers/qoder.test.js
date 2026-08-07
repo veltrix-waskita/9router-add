@@ -144,3 +144,44 @@ test("add() never logs the PAT; result payload still reaches the provider", asyn
   assert.ok(!all.includes(SECRET_PAT), "PAT leaked to console.log");
   assert.ok(!all.includes("super-secret"), "PAT substring leaked to console.log");
 });
+test("afterAdd appends PAT-only + full-account sidecar files", async () => {
+  const os = require("os");
+  const path = require("path");
+  const fs = require("fs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qoder-pats-"));
+  const p = new QoderProvider({ mode: "local", accountsDir: dir }, {}, {});
+  const result = {
+    ok: true,
+    connection: {
+      provider: "qoder",
+      email: "qodertest@minom.my.id",
+      password: "pw",
+      authType: "apikey",
+      data: { apiKey: "pt-abc-123", name: "Sam Lane" },
+    },
+  };
+  await p.afterAdd(result);
+  await p.afterAdd(result);
+  await p.afterAdd({ ok: true, connection: { data: { apiKey: "pt-other" } } });
+
+  const pats = fs.readFileSync(path.join(dir, "qoder-pats.txt"), "utf8");
+  assert.strictEqual(pats, "pt-abc-123\npt-abc-123\npt-other\n");
+  const accounts = fs.readFileSync(path.join(dir, "qoder-accounts.txt"), "utf8");
+  assert.ok(accounts.includes("qodertest@minom.my.id | Sam Lane | pt-abc-123"));
+  // Never the password.
+  assert.ok(!accounts.includes("pw"));
+  assert.ok(!pats.includes("pw"));
+});
+
+test("afterAdd skips sidecar write when result has no PAT", async () => {
+  const os = require("os");
+  const path = require("path");
+  const fs = require("fs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qoder-pats-"));
+  const p = new QoderProvider({ mode: "local", accountsDir: dir }, {}, {});
+  await p.afterAdd({ ok: false, error: "boom" });
+  await p.afterAdd({ ok: true, connection: { data: {} } });
+  await p.afterAdd();
+  assert.ok(!fs.existsSync(path.join(dir, "qoder-pats.txt")));
+  assert.ok(!fs.existsSync(path.join(dir, "qoder-accounts.txt")));
+});

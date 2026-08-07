@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("crypto");
+const fs = require("fs");
 const path = require("path");
 const { BaseProvider } = require("../../base/provider");
 const { AuthError } = require("../../base/errors");
@@ -64,6 +65,12 @@ function redactSecrets(text) {
  * Supports dual email source:
  *   - tempmail (default): worker generates a disposable inbox (ncaori).
  *   - imap: OTP via Gmail or minom alias mailbox.
+ *
+ * Output: after each successful signup, afterAdd() persists two files next to
+ * the generated-accounts JSON:
+ *   - qoder-pats.txt — PAT only, one per line (for mass API-key consumption).
+ *   - qoder-accounts.txt — full account data (email | name | PAT), one per
+ *     line (import/backup). Both 0600, gitignored, appended per success.
  *
  * Security: never logs the password or the PAT.
  */
@@ -210,6 +217,34 @@ class QoderProvider extends BaseProvider {
         },
       },
     };
+  }
+
+  /**
+   * Lifecycle: afterAdd — persist PAT-only + full-account sidecar files.
+   *
+   * Appends one PAT line to qoder-pats.txt and one account line to
+   * qoder-accounts.txt (both gitignored, 0600) next to the connection
+   * result. Only PAT/email/name — never the password. Non-fatal: a
+   * sidecar write failure must not fail the signup.
+   *
+   * @param {{ok:boolean, connection?:object}} result - add() result.
+   */
+  async afterAdd(result) {
+    if (!result || result.ok !== true || !result.connection) return;
+    const { connection } = result;
+    const pat = connection.data && connection.data.apiKey;
+    if (!pat) return;
+    const dir = this.config.accountsDir || process.cwd();
+    const patLine = `${pat}\n`;
+    const name = (connection.data && connection.data.name) || "";
+    const accountLine = `${connection.email} | ${name} | ${pat}\n`;
+    try {
+      fs.appendFileSync(path.join(dir, "qoder-pats.txt"), patLine, { mode: 0o600 });
+      fs.appendFileSync(path.join(dir, "qoder-accounts.txt"), accountLine, { mode: 0o600 });
+    } catch (err) {
+      // Sidecar persistence is best-effort; do not fail the signup.
+      console.warn(`[qoder] could not append PAT sidecar files: ${err.message}`);
+    }
   }
 
   /**

@@ -18,3 +18,6 @@ captcha-solver/venv/
 captcha-solver/.venv/
 captcha-solver/solver.env
 
+# Qoder sidecar outputs — contain live PATs (0600, appended per success).
+/qoder-pats.txt
+/qoder-accounts.txt

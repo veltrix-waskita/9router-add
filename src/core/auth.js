@@ -2,17 +2,40 @@
 
 const crypto = require("crypto");
 const fs = require("fs");
+const path = require("path");
 
 function cliToken(config) {
-  const machineIdPath = config.machineIdPath || require("path").join(require("os").homedir(), ".9router", "machine-id");
-  let machineId;
-  try {
-    machineId = fs.readFileSync(machineIdPath, "utf8").trim();
-  } catch {
-    throw new Error(`Cannot read machine-id from ${machineIdPath}`);
+  const homedir = require("os").homedir();
+  const dataDir = (config.dataDir && config.dataDir.trim()) || ".omni";
+  // Dashboard (azma-router) derives the CLI token as
+  // sha256(machineId + "9r-cli-auth" + cliSecret) from its own data dir
+  // (~/.omni) — machine-id + auth/cli-secret files, NOT config.cliSecret.
+  // Try the configured dir, fall back to the legacy ~/.9router layout.
+  const candidates = [
+    path.join(homedir, dataDir),
+    path.join(homedir, ".omni"),
+    path.join(homedir, ".9router"),
+  ];
+  for (const dir of candidates) {
+    try {
+      const machineId = fs.readFileSync(path.join(dir, "machine-id"), "utf8").trim();
+      const secretPath = path.join(dir, "auth", "cli-secret");
+      let secret;
+      try {
+        secret = fs.readFileSync(secretPath, "utf8").trim();
+      } catch {
+        secret = config.cliSecret || "";
+      }
+      const hash = crypto
+        .createHash("sha256")
+        .update(machineId + "9r-cli-auth" + secret)
+        .digest("hex");
+      return hash.slice(0, 16);
+    } catch {
+      // try next candidate dir
+    }
   }
-  const hash = crypto.createHash("sha256").update(machineId + "9r-cli-auth" + config.cliSecret).digest("hex");
-  return hash.slice(0, 16);
+  throw new Error("Cannot read machine-id / cli-secret (tried ~/.omni, ~/.9router)");
 }
 
 async function dashboardSession(config, httpClient) {
