@@ -238,6 +238,19 @@ const PROVIDER_INFO = {
     autoCredentials: true,
     supportsTempmail: true,
   },
+  qoder: {
+    label: "Qoder (AI coding)",
+    methods: ["email"],
+    notes:
+      "Email signup + PAT (pure-HTTP curl_cffi). emailSource=tempmail (default) / imap via Gmail or minom alias.",
+    needsBrowser: false,
+    needsWorker: true,
+    needsSolver: false,
+    needsImap: false,
+    batch: true,
+    autoCredentials: true,
+    supportsTempmail: true,
+  },
 };
 
 // Providers that can invent email+password (need catch-all alias domain).

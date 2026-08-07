@@ -13,6 +13,7 @@ test/fixtures/aliases.txt
 __pycache__/
 src/providers/kiro/worker/.venv/
 src/providers/grok-cli/worker/.venv/
+src/providers/qoder/worker/.venv/
 captcha-solver/venv/
 captcha-solver/.venv/
 captcha-solver/solver.env
