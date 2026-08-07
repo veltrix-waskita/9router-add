@@ -1,15 +1,211 @@
+import io
+import json
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
-from signup import encode_bx_ua, TMD_IN_URL, is_tmd_punish
+
+from signup import (
+    encode_bx_ua,
+    TMD_IN_URL,
+    is_tmd_punish,
+    _body_json,
+    _mask6,
+    create_pat,
+    login_me,
+    poll_otp,
+    register,
+    run,
+)
+import imap_otp
+
+
+class FakeResp:
+    """Minimal curl_cffi-like response for hermetic tests."""
+
+    def __init__(self, status_code=200, text="", json_data=None):
+        self.status_code = status_code
+        self._text = text
+        self._json = json_data
+
+    @property
+    def text(self):
+        return self._text
+
+    def json(self):
+        if self._json is None:
+            raise ValueError("no json")
+        return self._json
+
 
 class TestHelpers(unittest.TestCase):
     def test_bx_ua_nonempty(self):
         self.assertGreater(len(encode_bx_ua()), 10)
 
     def test_tmd_detect(self):
-        self.assertTrue(is_tmd_punish({"x5secdata":"xx"} ))
-        self.assertFalse(is_tmd_punish({"errorCode":"BadRequest"}))
-        self.assertFalse(is_tmd_punish({"errorMessage":"Code required"}))
+        self.assertTrue(is_tmd_punish({"x5secdata": "xx"}))
+        self.assertFalse(is_tmd_punish({"errorCode": "BadRequest"}))
+        self.assertFalse(is_tmd_punish({"errorMessage": "Code required"}))
+
+    def test_mask6(self):
+        self.assertEqual(_mask6("code 123456 sent"), "code ****** sent")
+        self.assertNotIn("707124", _mask6("707124"))
+        self.assertEqual(_mask6(None), "")
+
+    def test_body_json(self):
+        self.assertEqual(_body_json(FakeResp(200, json_data={"a": 1})), {"a": 1})
+        self.assertIsNone(_body_json(FakeResp(200, text="not json")))
+
+
+class TestImapExtract(unittest.TestCase):
+    def test_labeled_digit6(self):
+        self.assertEqual(
+            imap_otp.extract_otp("Your verification code is 482913"),
+            "482913",
+        )
+
+    def test_bare_digit6_with_qoder_context(self):
+        self.assertEqual(
+            imap_otp.extract_otp("qoder code: 482913"),
+            "482913",
+        )
+
+    def test_noise_skipped(self):
+        self.assertNotEqual(imap_otp.extract_otp("code 123456"), "123456")
+        self.assertIsNone(imap_otp.extract_otp("no code here 123456"))
+
+    def test_message_extract(self):
+        raw = (
+            b"Subject: [Qoder] Your verification code\r\n"
+            b"To: someone@example.com\r\n"
+            b"\r\n"
+            b"Your verification code is 482913.\r\n"
+        )
+        self.assertEqual(imap_otp.extract_otp_from_message(raw), "482913")
+
+
+class TestApiFns(unittest.TestCase):
+    def test_login_me_ok(self):
+        s = mock.Mock()
+        s.get.return_value = FakeResp(200, json_data={"id": "u1", "name": "Alex"})
+        self.assertEqual(login_me(s), {"id": "u1", "name": "Alex"})
+
+    def test_login_me_error(self):
+        s = mock.Mock()
+        s.get.return_value = FakeResp(401, text="no")
+        self.assertIsNone(login_me(s))
+
+    def test_create_pat_returns_token_text(self):
+        s = mock.Mock()
+        s.post.return_value = FakeResp(
+            201,
+            json_data={
+                "token_id": "t1",
+                "token": "pt-secret-abc",
+                "expires_at": 2534023007999,
+            },
+        )
+        self.assertEqual(create_pat(s, "Alex Rivera"), "pt-secret-abc")
+
+    def test_create_pat_none_on_error(self):
+        s = mock.Mock()
+        s.post.return_value = FakeResp(500, text="boom")
+        self.assertIsNone(create_pat(s))
+
+    def test_register_sends_payload_with_proxy(self):
+        s = mock.Mock()
+        s.post.return_value = FakeResp(200, text="")
+        register(s, "a@b.c", "pw123", "Alex", code="482913", proxy="http://p:8080")
+        args, kw = s.post.call_args
+        self.assertTrue(args[0].endswith("/api/v1/users"))
+        self.assertEqual(kw["proxy"], "http://p:8080")
+        body = kw["json"]
+        self.assertEqual(body["code"], "482913")
+        self.assertEqual(body["type"], "email_pwd")
+        self.assertTrue(body["bx-ua"])
+
+
+class TestRunFlow(unittest.TestCase):
+    def _emit_lines(self, fn, env):
+        buf = io.StringIO()
+        with mock.patch.dict("os.environ", env, clear=False):
+            with redirect_stdout(buf):
+                rc = fn()
+        lines = [json.loads(l) for l in buf.getvalue().splitlines() if l.strip()]
+        return rc, lines
+
+    def test_run_success_masked_output(self):
+        box = mock.Mock()
+        box.address = "swift_core1234@ncaori.my.id"
+        box.create_account.return_value = box.address
+        box.wait_code.return_value = "482913"
+
+        s = mock.Mock()
+        s.get.side_effect = [
+            FakeResp(200, text="signup page"),            # signup_page
+            FakeResp(200, json_data={"id": "u1"}),         # login_me
+        ]
+        s.post.side_effect = [
+            FakeResp(400, text='{"errorMessage":"Code required"}'),  # step1
+            FakeResp(200, text=""),                                   # step2
+            FakeResp(201, json_data={"token": "pt-secret-abc"}),      # PAT
+        ]
+
+        with mock.patch("signup._session", return_value=s), \
+             mock.patch("tempmail.EmailBox", return_value=box):
+            rc, lines = self._emit_lines(
+                run,
+                {
+                    "QODER_EMAIL": "",
+                    "QODER_PASSWORD": "Sup3rSecret!",
+                    "QODER_EMAIL_SOURCE": "tempmail",
+                    "QODER_NAME": "Alex Rivera",
+                },
+            )
+
+        self.assertEqual(rc, 0)
+        results = [l for l in lines if l.get("kind") == "result"]
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["ok"])
+        self.assertEqual(results[0]["pat"], "pt-secret-abc")
+        self.assertTrue(results[0]["me"])
+        blob = json.dumps(lines)
+        self.assertNotIn("Sup3rSecret", blob)
+        self.assertNotIn("482913", blob)
+        # password never emitted; 6-digit runs never emitted in steps
+        self.assertNotIn("password", blob)
+
+    def test_run_missing_env(self):
+        rc, lines = self._emit_lines(run, {"QODER_EMAIL": "", "QODER_PASSWORD": ""})
+        self.assertEqual(rc, 1)
+        self.assertEqual(lines[-1]["error"], "missing-email-or-password")
+
+    def test_run_tmd_persistent(self):
+        box = mock.Mock()
+        box.address = "x@ncaori.my.id"
+        box.create_account.return_value = box.address
+        s = mock.Mock()
+        s.get.return_value = FakeResp(200, text="page")
+        s.post.return_value = FakeResp(403, json_data={"x5secdata": "block"})
+        with mock.patch("signup._session", return_value=s), \
+             mock.patch("tempmail.EmailBox", return_value=box):
+            rc, lines = self._emit_lines(
+                run,
+                {
+                    "QODER_EMAIL": "",
+                    "QODER_PASSWORD": "pw",
+                    "QODER_EMAIL_SOURCE": "tempmail",
+                },
+            )
+        self.assertEqual(rc, 1)
+        self.assertEqual(lines[-1]["error"], "tmd-persistent")
+
+    def test_poll_otp_imap_path(self):
+        with mock.patch("imap_otp.read_otp", return_value="482913") as read:
+            code = poll_otp("a@b.c", "imap", proxy=None, box=None, timeout=10, interval=1)
+        self.assertEqual(code, "482913")
+        read.assert_called_once()
+        self.assertEqual(read.call_args[0][0], "a@b.c")
+
 
 if __name__ == "__main__":
     unittest.main()
