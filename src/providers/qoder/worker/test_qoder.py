@@ -164,7 +164,8 @@ class TestRunFlow(unittest.TestCase):
         ]
 
         with mock.patch("signup._session", return_value=s), \
-             mock.patch("tempmail.EmailBox", return_value=box):
+             mock.patch("tempmail.EmailBox", return_value=box), \
+             mock.patch("signup.solve_captcha", return_value='{"sceneId":"1r7eif79x","certifyId":"c1","deviceToken":"d1","data":"x"}'):
             rc, lines = self._emit_lines(
                 run,
                 {
@@ -218,7 +219,8 @@ class TestRunFlow(unittest.TestCase):
         ]
 
         with mock.patch("signup._session", return_value=s), \
-             mock.patch("tempmail.EmailBox", return_value=box):
+             mock.patch("tempmail.EmailBox", return_value=box), \
+             mock.patch("signup.solve_captcha", return_value='{"sceneId":"s","certifyId":"c","deviceToken":"d","data":"x"}'):
             rc, lines = self._emit_lines(
                 run,
                 {
@@ -239,7 +241,8 @@ class TestRunFlow(unittest.TestCase):
         s.get.return_value = FakeResp(200, text="page")
         s.post.return_value = FakeResp(403, json_data={"x5secdata": "block"})
         with mock.patch("signup._session", return_value=s), \
-             mock.patch("tempmail.EmailBox", return_value=box):
+             mock.patch("tempmail.EmailBox", return_value=box), \
+             mock.patch("signup.solve_captcha", return_value='{"sceneId":"s","certifyId":"c","deviceToken":"d","data":"x"}'):
             rc, lines = self._emit_lines(
                 run,
                 {
@@ -277,7 +280,8 @@ class TestRunFlow(unittest.TestCase):
         ]
 
         with mock.patch("signup._session", return_value=s), \
-             mock.patch("tempmail.EmailBox", return_value=box):
+             mock.patch("tempmail.EmailBox", return_value=box), \
+             mock.patch("signup.solve_captcha", return_value='{"sceneId":"s","certifyId":"c","deviceToken":"d","data":"x"}'):
             rc, lines = self._emit_lines(
                 run,
                 {

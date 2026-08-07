@@ -73,6 +73,51 @@ def _body_json(r: Any) -> Any:
         return None
 
 
+SOLVER_URL = os.getenv("QODER_SOLVER_URL", "http://127.0.0.1:8877/solve")
+QODER_ALIYUN_SCENE = "1r7eif79x"      # from HAR InitCaptchaV3
+QODER_ALIYUN_PREFIX = "13lbkb5"       # from HTML AliyunCaptchaConfig
+
+
+def solve_captcha(scene_id: str = QODER_ALIYUN_SCENE, prefix: str = QODER_ALIYUN_PREFIX) -> str | None:
+    """Solve the Aliyun slider CAPTCHA via the local solver (:8877) and return
+    the captchaVerifyParam JSON string ready for verificationCodes.
+
+    Qoder's verificationCodes requires a CAPTCHA verify param (server returns
+    400 "with no captcha verify param" without it). The solve returns an aliyun
+    token {sceneId, certifyId, deviceToken, data} which the caller serializes
+    into captchaVerifyParam.
+    """
+    try:
+        r = creq.post(
+            SOLVER_URL,
+            json={
+                "type": "aliyun",
+                "scene_id": scene_id,
+                "prefix": prefix,
+                "region": "sgp",
+                "timeout_s": 100,
+                "raw": True,
+            },
+            headers={"Content-Type": "application/json"},
+            impersonate="chrome",
+            timeout=115,
+        )
+        d = r.json()
+        if not d.get("solved"):
+            emit({"event": "debug", "msg": "captcha-solve-fail", "error": str(d.get("error", ""))[:80]})
+            return None
+        tok = d["token"]
+        return json.dumps({
+            "sceneId": tok.get("sceneId", scene_id),
+            "certifyId": tok["certifyId"],
+            "deviceToken": tok.get("deviceToken", ""),
+            "data": tok.get("data", ""),
+        })
+    except Exception as e:
+        emit({"event": "debug", "msg": "captcha-solve-error", "error": str(e)[:80]})
+        return None
+
+
 def is_tmd_punish(body: Any) -> bool:
     """True when the response is a TMD jail / punish page instead of the clean
     400 "Code required" OTP handshake.
@@ -143,15 +188,19 @@ def send_verification_code(
     """POST /api/v1/verificationCodes — THE endpoint that delivers the OTP.
 
     HAR capture (2026-08-07): {channel:"email", scene:"register", email, bx-ua}
-    → 200. This is called BEFORE /api/v1/users; the register call then carries
-    the received code. A code-less /users call alone never sends the email.
+    → 200. Called BEFORE /api/v1/users; the register call then carries the
+    received code. Server now REQUIRES a captchaVerifyParam (400 "with no
+    captcha verify param" otherwise) — solved via the local aliyun solver.
     """
+    captcha_param = solve_captcha()
     payload = {
         "channel": "email",
         "scene": "register",
         "email": email,
         "bx-ua": encode_bx_ua(),
     }
+    if captcha_param:
+        payload["captchaVerifyParam"] = captcha_param
     h = {
         "Content-Type": "application/json",
         "Referer": f"{BASE}/users/sign-up",
