@@ -104,8 +104,12 @@ def register(
     code: str = "",
     proxy: str | None = None,
 ) -> Any:
-    """POST /api/v1/users — code="" triggers OTP (400 Code required); a valid
-    code completes registration (200, empty body) and sets the session cookie.
+    """POST /api/v1/users — completes registration with the OTP `code`.
+
+    Flow per HAR: the OTP is delivered by POST /api/v1/verificationCodes
+    (see send_verification_code), then this endpoint is called WITH the code
+    (200, empty body, session cookie set). A code-less call returns
+    400 "Code required" — it does NOT trigger OTP delivery.
 
     A fresh random bx-ua is generated on every call (TMD bypass).
     """
@@ -129,6 +133,56 @@ def register(
     if proxy:
         kw["proxy"] = proxy
     return s.post(f"{BASE}/api/v1/users", **kw)
+
+
+def send_verification_code(
+    s: Any,
+    email: str,
+    proxy: str | None = None,
+) -> Any:
+    """POST /api/v1/verificationCodes — THE endpoint that delivers the OTP.
+
+    HAR capture (2026-08-07): {channel:"email", scene:"register", email, bx-ua}
+    → 200. This is called BEFORE /api/v1/users; the register call then carries
+    the received code. A code-less /users call alone never sends the email.
+    """
+    payload = {
+        "channel": "email",
+        "scene": "register",
+        "email": email,
+        "bx-ua": encode_bx_ua(),
+    }
+    h = {
+        "Content-Type": "application/json",
+        "Referer": f"{BASE}/users/sign-up",
+        "Origin": BASE,
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+    }
+    kw: dict[str, Any] = {"json": payload, "headers": h, "impersonate": "chrome131", "timeout": 30}
+    if proxy:
+        kw["proxy"] = proxy
+    return s.post(f"{BASE}/api/v1/verificationCodes", **kw)
+
+
+def check_login_type(s: Any, email: str, proxy: str | None = None) -> Any:
+    """POST /api/v1/auth/check-login-type — returns the login type for an email.
+
+    HAR order: called before verificationCodes. Payload {email, bx-ua}.
+    Optional pre-flight; a failure here is non-fatal (register still proceeds).
+    """
+    payload = {"email": email, "bx-ua": encode_bx_ua()}
+    h = {
+        "Content-Type": "application/json",
+        "Referer": f"{BASE}/users/sign-up",
+        "Origin": BASE,
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+    }
+    kw: dict[str, Any] = {"json": payload, "headers": h, "impersonate": "chrome131", "timeout": 30}
+    if proxy:
+        kw["proxy"] = proxy
+    return s.post(f"{BASE}/api/v1/auth/check-login-type", **kw)
 
 
 # ---- OTP polling -----------------------------------------------------------
@@ -283,21 +337,23 @@ def run() -> int:
         emit_step("bootstrap", "ok")
         signup_page(s)
 
-        # step1: register with empty code -> the server asks for OTP (400 Code
-        # required, or TMD punish if bx-ua fails).
-        emit_step("register", "pending")
-        r1 = register(s, email, password, name, proxy=proxy)
-        # Live punish is HTTP 200 HTML; check raw text too (dict-only missed it
-        # and wrongly routed punished sessions into the OTP poll).
-        if is_tmd_punish(r1.text) or is_tmd_punish(_body_json(r1)):
+        # step1a: optional check-login-type pre-flight (HAR order). Non-fatal.
+        try:
+            check_login_type(s, email, proxy=proxy)
+            emit_step("check_login_type", "ok")
+        except Exception:
+            emit_step("check_login_type", "warn")
+
+        # step1b: send_verification_code -> triggers the OTP email delivery.
+        # Live punish is HTTP 200 HTML; check raw text too.
+        emit_step("verification_code", "pending")
+        rv = send_verification_code(s, email, proxy=proxy)
+        if is_tmd_punish(rv.text) or is_tmd_punish(_body_json(rv)):
             emit_step("tmd", "warn")
             ok = False
             for _attempt in range(3):
-                r1 = register(s, email, password, name, proxy=proxy)
-                # Retry only on actual TMD punish (HTML or JSON marker). A
-                # normal 400 `Code required` here means the OTP flow is live —
-                # fall through to the poll instead of burning retries.
-                if is_tmd_punish(r1.text) or is_tmd_punish(_body_json(r1)):
+                rv = send_verification_code(s, email, proxy=proxy)
+                if is_tmd_punish(rv.text) or is_tmd_punish(_body_json(rv)):
                     continue
                 ok = True
                 break
@@ -305,23 +361,24 @@ def run() -> int:
                 emit_result(False, error="tmd-persistent", step="spam")
                 return 1
         else:
-            # 400 `Code required` path — OTP pending
-            emit_step("otp_pending", "ok")
+            emit_step("verification_code", "ok")
 
         code = poll_otp(email, source, proxy=proxy, box=box)
         if not code:
             emit_result(False, error="otp-timeout", step="otp")
             return 1
 
-        # step2: submit the code
+        # step2: register WITH the OTP code (completes verification + session).
+        emit_step("register", "pending")
         r2 = register(s, email, password, name, code=code, proxy=proxy)
         if r2.status_code >= 400:
             emit_result(
                 False,
-                error=f"register-step2 http-{r2.status_code} {_mask6(r2.text[:120])}",
-                step="register2",
+                error=f"register http-{r2.status_code} {_mask6(r2.text[:120])}",
+                step="register",
             )
             return 1
+        emit_step("register", "ok")
 
         # PAT + auth check
         pat = create_pat(s, name)

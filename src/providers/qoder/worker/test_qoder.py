@@ -157,9 +157,10 @@ class TestRunFlow(unittest.TestCase):
             FakeResp(200, json_data={"id": "u1"}),         # login_me
         ]
         s.post.side_effect = [
-            FakeResp(400, text='{"errorMessage":"Code required"}'),  # step1
-            FakeResp(200, text=""),                                   # step2
-            FakeResp(201, json_data={"token": "pt-secret-abc"}),      # PAT
+            FakeResp(200, text="{}"),                      # check_login_type
+            FakeResp(200, text=""),                        # verificationCodes (OTP sent)
+            FakeResp(200, text=""),                        # register with code
+            FakeResp(201, json_data={"token": "pt-secret-abc"}),  # PAT
         ]
 
         with mock.patch("signup._session", return_value=s), \
@@ -210,9 +211,10 @@ class TestRunFlow(unittest.TestCase):
         s = mock.Mock()
         s.get.return_value = FakeResp(200, text="page")  # signup_page only
         s.post.side_effect = [
-            FakeResp(400, text='{"errorMessage":"Code required"}'),  # step1
-            FakeResp(200, text=""),                                   # step2
-            FakeResp(500, text="boom"),                               # PAT fails
+            FakeResp(200, text="{}"),                      # check_login_type
+            FakeResp(200, text=""),                        # verificationCodes (OTP sent)
+            FakeResp(200, text=""),                        # register with code
+            FakeResp(500, text="boom"),                    # PAT fails
         ]
 
         with mock.patch("signup._session", return_value=s), \
@@ -248,7 +250,8 @@ class TestRunFlow(unittest.TestCase):
             )
         self.assertEqual(rc, 1)
         self.assertEqual(lines[-1]["error"], "tmd-persistent")
-        self.assertEqual(s.post.call_count, 4)  # step1 + 3 retries
+        # check_login_type + verificationCodes step1 + 3 retries
+        self.assertEqual(s.post.call_count, 5)
 
     def test_run_tmd_html_then_otp_recovers(self):
         # Live punish is HTTP 200 HTML (x5secdata page). A later retry returns
@@ -266,10 +269,11 @@ class TestRunFlow(unittest.TestCase):
             FakeResp(200, json_data={"id": "u1"}),         # login_me
         ]
         s.post.side_effect = [
-            FakeResp(200, text='<script>x5secdata="a1"</script>'),  # HTML punish
-            FakeResp(400, text='{"errorMessage":"Code required"}'),  # retry -> OTP live
-            FakeResp(200, text=""),                                   # step2
-            FakeResp(201, json_data={"token": "pt-secret-abc"}),      # PAT
+            FakeResp(200, text="{}"),                                  # check_login_type
+            FakeResp(200, text='<script>x5secdata="a1"</script>'),     # verificationCodes HTML punish
+            FakeResp(200, text=""),                                    # retry -> OTP sent
+            FakeResp(200, text=""),                                    # register with code
+            FakeResp(201, json_data={"token": "pt-secret-abc"}),       # PAT
         ]
 
         with mock.patch("signup._session", return_value=s), \
