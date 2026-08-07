@@ -26,6 +26,44 @@ test("parseWorkerLine keeps result payload (pat/email survive round-trip)", () =
   assert.strictEqual(parsed.payload.email, "a@b");
 });
 
+test("parseWorkerLine classifies worker step lines as events (not debug)", () => {
+  // Worker emits {"event":"step",...} (kiro convention). Tempmail address
+  // capture in add() depends on these reaching the provider as events.
+  const parsed = parseWorkerLine(
+    JSON.stringify({ event: "step", step: "tempmail_create", status: "ok", address: "iron@nca.my.id" })
+  );
+  assert.strictEqual(parsed.kind, "event");
+  assert.strictEqual(parsed.event, "step");
+  assert.strictEqual(parsed.payload.step, "tempmail_create");
+  assert.strictEqual(parsed.payload.address, "iron@nca.my.id");
+});
+
+test("add() captures the worker's tempmail address for the connection email", async () => {
+  const p = new QoderProvider({ mode: "local" }, {}, {});
+  // Worker first reports the real temp-mail address, then the final PAT result.
+  p._spawnSignupWorker = async (workerDir, env, { onEvent }) => {
+    onEvent(parseWorkerLine(
+      JSON.stringify({ event: "step", step: "tempmail_create", status: "ok", address: "iron@nca.my.id" })
+    ));
+    onEvent(parseWorkerLine(
+      JSON.stringify({ kind: "result", ok: true, step: "register2", email: "iron@nca.my.id", pat: "pt-x", name: "Nexus" })
+    ));
+  };
+  const origLog = console.log;
+  console.log = () => {};
+  try {
+    const result = await p.add(
+      { email: "tempmail@pending.local", password: "pw" },
+      { emailSource: "tempmail" }
+    );
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.connection.email, "iron@nca.my.id");
+    assert.strictEqual(result.connection.data.apiKey, "pt-x");
+  } finally {
+    console.log = origLog;
+  }
+});
+
 test("buildWorkerEnv emits QODER_* keys for the worker os.getenv", () => {
   const env = buildWorkerEnv({
     credentials: { email: "a@b.com", password: "pw", name: "Sam" },

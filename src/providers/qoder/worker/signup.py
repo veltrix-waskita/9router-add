@@ -43,7 +43,10 @@ def _mask6(text: Any) -> str:
 
 
 def emit_step(step: str, status: str = "ok", **kv: Any) -> None:
-    print(json.dumps({"kind": "step", "step": step, "status": status, **kv}), flush=True)
+    # {"event":"step"} matches the bridge parseWorkerLine convention (kiro
+    # emits the same shape), so Node classifies step lines as events and can
+    # capture fields like the tempmail_create address.
+    print(json.dumps({"event": "step", "step": step, "status": status, **kv}), flush=True)
 
 
 def emit_result(ok: bool, **kv: Any) -> None:

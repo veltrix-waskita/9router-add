@@ -125,6 +125,13 @@ class QoderProvider extends BaseProvider {
     const spawn = this._spawnSignupWorker || spawnSignupWorker;
     await spawn(workerDir, env, {
       onEvent: (parsed) => {
+        // Capture the real temp-mail address when the worker creates one
+        // (this._accountEmail starts as the "tempmail@pending.local" placeholder),
+        // so the connection + generated-accounts file carry the live address.
+        const payload = parsed.payload || parsed;
+        if (payload.step === "tempmail_create" && payload.address) {
+          this._accountEmail = payload.address;
+        }
         if (parsed.kind === "result") {
           lastPayload = parsed.payload || parsed;
         }
@@ -158,11 +165,17 @@ class QoderProvider extends BaseProvider {
         `qoder signup did not yield a PAT: ${String(result.error || "no-pat-result").slice(0, 200)}`
       );
     }
+    // Prefer the email the worker actually registered (temp-mail address), falling
+    // back to the provider's bookkeeping email.
+    const accountEmail =
+      (typeof result.email === "string" && result.email && !result.email.includes("pending.local")
+        ? result.email
+        : email) || email;
     return {
       ok: true,
       connection: {
         provider: "qoder",
-        email: email || result.email,
+        email: accountEmail,
         password,
         authType: "apikey",
         data: {
