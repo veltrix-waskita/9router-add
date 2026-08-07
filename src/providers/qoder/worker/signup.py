@@ -80,12 +80,16 @@ QODER_ALIYUN_PREFIX = "13lbkb5"       # from HTML AliyunCaptchaConfig
 
 def solve_captcha(scene_id: str = QODER_ALIYUN_SCENE, prefix: str = QODER_ALIYUN_PREFIX) -> str | None:
     """Solve the Aliyun slider CAPTCHA via the local solver (:8877) and return
-    the captchaVerifyParam JSON string ready for verificationCodes.
+    the base64 X-Captcha-Verify-Param header value.
 
-    Qoder's verificationCodes requires a CAPTCHA verify param (server returns
-    400 "with no captcha verify param" without it). The solve returns an aliyun
-    token {sceneId, certifyId, deviceToken, data} which the caller serializes
-    into captchaVerifyParam.
+    Qoder's verificationCodes requires the captcha proof in the
+    X-Captcha-Verify-Param HEADER (server 400s "with no captcha verify param"
+    otherwise). The server expects base64 of:
+      {"certifyId":..., "sceneId":..., "isSign":true, "securityToken":...}
+    where certifyId + securityToken come from the aliyun VerifyCaptchaV3
+    pipeline — so the solver MUST run with raw=false (verify in page), which
+    returns verify_code T001 + security_token (128 chars). raw=true yields
+    only deviceToken/data which the server rejects.
     """
     try:
         r = creq.post(
@@ -96,23 +100,28 @@ def solve_captcha(scene_id: str = QODER_ALIYUN_SCENE, prefix: str = QODER_ALIYUN
                 "prefix": prefix,
                 "region": "sgp",
                 "timeout_s": 100,
-                "raw": True,
+                "raw": False,  # verify in page → securityToken (raw=true gives none)
             },
             headers={"Content-Type": "application/json"},
             impersonate="chrome",
             timeout=115,
         )
         d = r.json()
-        if not d.get("solved"):
+        if not d.get("solved") or d.get("verify_code") != "T001":
             emit({"event": "debug", "msg": "captcha-solve-fail", "error": str(d.get("error", ""))[:80]})
             return None
         tok = d["token"]
-        return json.dumps({
+        st = d.get("security_token") or ""
+        if not st:
+            emit({"event": "debug", "msg": "captcha-no-security-token"})
+            return None
+        payload = {
+            "certifyId": tok.get("certifyId", ""),
             "sceneId": tok.get("sceneId", scene_id),
-            "certifyId": tok["certifyId"],
-            "deviceToken": tok.get("deviceToken", ""),
-            "data": tok.get("data", ""),
-        })
+            "isSign": True,
+            "securityToken": st,
+        }
+        return base64.b64encode(json.dumps(payload).encode()).decode()
     except Exception as e:
         emit({"event": "debug", "msg": "captcha-solve-error", "error": str(e)[:80]})
         return None
@@ -199,15 +208,20 @@ def send_verification_code(
         "email": email,
         "bx-ua": encode_bx_ua(),
     }
-    if captcha_param:
-        payload["captchaVerifyParam"] = captcha_param
     h = {
         "Content-Type": "application/json",
         "Referer": f"{BASE}/users/sign-up",
         "Origin": BASE,
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-Mode": "cors",
+        "X-Csrf-Token": "_echo_csrf_using_sec_fetch_site_",
+        "X-Requested-With": "XMLHttpRequest",
+        "Bx-V": "2.5.35",
     }
+    if captcha_param:
+        # The captcha proof must be a HEADER (base64 JSON), not a body field —
+        # qoder 400s "with no captcha verify param" when it's in the body.
+        h["X-Captcha-Verify-Param"] = captcha_param
     kw: dict[str, Any] = {"json": payload, "headers": h, "impersonate": "chrome131", "timeout": 30}
     if proxy:
         kw["proxy"] = proxy
