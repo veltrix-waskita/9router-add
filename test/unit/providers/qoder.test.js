@@ -26,6 +26,46 @@ test("parseWorkerLine keeps result payload (pat/email survive round-trip)", () =
   assert.strictEqual(parsed.payload.email, "a@b");
 });
 
+test("buildWorkerEnv imap mode wires config.imap into QODER_IMAP_* keys", () => {
+  const env = buildWorkerEnv({
+    credentials: { email: "you+tag@gmail.com", password: "pw", name: "Sam" },
+    config: {
+      providers: { qoder: { otpSubject: "Qoder code" } },
+      providerConfig: {},
+      imap: {
+        host: "imap.gmail.com",
+        port: 993,
+        user: "tauvindpwtuba@gmail.com",
+        password: "app-pw",
+        tls: true,
+        deleteAfterRead: true,
+      },
+    },
+    options: { emailSource: "imap" },
+  });
+  assert.strictEqual(env.QODER_EMAIL_SOURCE, "imap");
+  assert.strictEqual(env.QODER_IMAP_HOST, "imap.gmail.com");
+  assert.strictEqual(env.QODER_IMAP_PORT, "993");
+  assert.strictEqual(env.QODER_IMAP_USER, "tauvindpwtuba@gmail.com");
+  assert.strictEqual(env.QODER_IMAP_PASSWORD, "app-pw");
+  assert.strictEqual(env.QODER_IMAP_TLS, "true");
+  assert.strictEqual(env.QODER_IMAP_DELETE_AFTER_READ, "true");
+  assert.strictEqual(env.QODER_OTP_SUBJECT, "Qoder code");
+  assert.ok(env.QODER_OTP_SENDER_DOMAIN.includes("qoder.com"));
+});
+
+test("buildWorkerEnv tempmail mode does not require QODER_IMAP_* keys", () => {
+  const env = buildWorkerEnv({
+    credentials: { email: "", password: "pw", name: "Sam" },
+    config: { providers: { qoder: {} }, providerConfig: {}, imap: {} },
+    options: { emailSource: "tempmail" },
+  });
+  assert.strictEqual(env.QODER_EMAIL_SOURCE, "tempmail");
+  assert.strictEqual(env.QODER_IMAP_USER, undefined);
+  assert.strictEqual(env.QODER_IMAP_PASSWORD, undefined);
+  assert.strictEqual(env.QODER_IMAP_HOST, undefined);
+});
+
 test("parseWorkerLine classifies worker step lines as events (not debug)", () => {
   // Worker emits {"event":"step",...} (kiro convention). Tempmail address
   // capture in add() depends on these reaching the provider as events.

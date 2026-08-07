@@ -72,6 +72,7 @@ function pickName(name) {
  * @returns {object<string,string>} env map for the child process.
  */
 function buildWorkerEnv({ credentials = {}, config = {}, options = {} }) {
+  const imap = (config && config.imap) || {};
   const providerCfg =
     (config && config.providers && config.providers["qoder"]) ||
     (config && config.providerConfig) ||
@@ -91,6 +92,24 @@ function buildWorkerEnv({ credentials = {}, config = {}, options = {} }) {
       "https://qoder.com/users/sign-up",
     PURE_HTTP: "1",
   };
+
+  // IMAP env vars only for imap mode (mirrors the kiro bridge). The worker's
+  // imap_otp.read_otp fails fast when user/password are empty, so config.imap
+  // must be wired through for the QODER_EMAIL_SOURCE=imap path to work at all.
+  if (emailSource === "imap") {
+    env.QODER_IMAP_HOST = String(imap.host || "imap.gmail.com");
+    env.QODER_IMAP_PORT = String(imap.port || 993);
+    env.QODER_IMAP_USER = imap.user || "";
+    env.QODER_IMAP_PASSWORD = imap.password || "";
+    env.QODER_IMAP_TLS = String(imap.tls !== false);
+    env.QODER_IMAP_DELETE_AFTER_READ = String(imap.deleteAfterRead === true);
+    env.QODER_OTP_SUBJECT = String(
+      providerCfg.otpSubject || ""
+    );
+    env.QODER_OTP_SENDER_DOMAIN = String(
+      providerCfg.otpSenderDomain || "qoder.com,noreply.qoder.com"
+    );
+  }
 
   // Optional proxy: accept a ready URL string OR { host, port, username?, password?, protocol? }.
   const proxy = options && options.proxy;
