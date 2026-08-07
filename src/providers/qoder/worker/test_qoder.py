@@ -175,9 +175,47 @@ class TestRunFlow(unittest.TestCase):
         self.assertNotIn("password", blob)
 
     def test_run_missing_env(self):
-        rc, lines = self._emit_lines(run, {"QODER_EMAIL": "", "QODER_PASSWORD": ""})
+        # No network: missing password short-circuits at the env guard before
+        # any tempmail box is created. EmailBox is still mocked so the test
+        # stays offline even if the guard order changes.
+        box = mock.Mock()
+        box.address = "x@ncaori.my.id"
+        box.create_account.return_value = box.address
+        with mock.patch("tempmail.EmailBox", return_value=box):
+            rc, lines = self._emit_lines(
+                run, {"QODER_EMAIL": "", "QODER_PASSWORD": ""}
+            )
         self.assertEqual(rc, 1)
         self.assertEqual(lines[-1]["error"], "missing-email-or-password")
+        box.create_account.assert_not_called()
+
+    def test_run_pat_missing_fails(self):
+        box = mock.Mock()
+        box.address = "x@ncaori.my.id"
+        box.create_account.return_value = box.address
+        box.wait_code.return_value = "482913"
+
+        s = mock.Mock()
+        s.get.return_value = FakeResp(200, text="page")  # signup_page only
+        s.post.side_effect = [
+            FakeResp(400, text='{"errorMessage":"Code required"}'),  # step1
+            FakeResp(200, text=""),                                   # step2
+            FakeResp(500, text="boom"),                               # PAT fails
+        ]
+
+        with mock.patch("signup._session", return_value=s), \
+             mock.patch("tempmail.EmailBox", return_value=box):
+            rc, lines = self._emit_lines(
+                run,
+                {
+                    "QODER_EMAIL": "",
+                    "QODER_PASSWORD": "pw",
+                    "QODER_EMAIL_SOURCE": "tempmail",
+                },
+            )
+        self.assertEqual(rc, 1)
+        self.assertEqual(lines[-1]["error"], "pat-missing")
+        self.assertEqual(lines[-1]["step"], "pat")
 
     def test_run_tmd_persistent(self):
         box = mock.Mock()

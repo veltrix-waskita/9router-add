@@ -241,6 +241,15 @@ def run() -> int:
     source = (os.getenv("QODER_EMAIL_SOURCE") or "tempmail").strip().lower()
     proxy = (os.getenv("QODER_PROXY") or "").strip() or None
 
+    # Env guard BEFORE any network: tempmail mode generates the email, but a
+    # missing password (or a missing email for imap) must fail fast, offline.
+    if source != "tempmail" and not email:
+        emit_result(False, error="missing-email-or-password", step="init")
+        return 1
+    if not password:
+        emit_result(False, error="missing-email-or-password", step="init")
+        return 1
+
     box: Any = None
     if source == "tempmail":
         emit_step("tempmail_init", "ok")
@@ -250,7 +259,7 @@ def run() -> int:
         email = box.create_account()
         emit_step("tempmail_create", "ok", address=email)
 
-    if not email or not password:
+    if not email:
         emit_result(False, error="missing-email-or-password", step="init")
         return 1
 
@@ -296,12 +305,17 @@ def run() -> int:
 
         # PAT + auth check
         pat = create_pat(s, name)
+        if not pat:
+            # The Node provider's connection object requires a real PAT
+            # (apiKey); an account without one is a false success.
+            emit_result(False, error="pat-missing", step="pat")
+            return 1
         me = login_me(s)
         emit_result(
             True,
             email=email,
             name=name,
-            pat=(pat or None),
+            pat=pat,
             me=bool(me),
         )
         return 0
