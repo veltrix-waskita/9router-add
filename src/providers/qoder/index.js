@@ -12,6 +12,21 @@ const {
 } = require("./worker-bridge");
 
 /**
+ * Security: strip secret-bearing keys before a worker line hits console.log.
+ * Result lines carry the PAT (pat/token) + email; never serialize them.
+ * @param {object} obj - full worker payload (already parsed).
+ * @returns {object} same shape with secret values removed.
+ */
+function scrubForLog(obj) {
+  if (!obj || typeof obj !== "object") return obj;
+  const out = { ...obj };
+  for (const key of ["pat", "token", "password", "apiKey", "authorization"]) {
+    if (key in out) out[key] = "[redacted]";
+  }
+  return out;
+}
+
+/**
  * Qoder provider — automates Qoder (qoder.com) AI coding account registration
  * + Personal Access Token (PAT) generation.
  *
@@ -105,14 +120,17 @@ class QoderProvider extends BaseProvider {
     console.log(`[${label}] Spawning Python pure-HTTP worker (qoder)...`);
 
     let lastPayload = null;
-    await spawnSignupWorker(workerDir, env, {
+    // this._spawnSignupWorker is the DI seam (tests stub it to capture onEvent
+    // without spawning a real subprocess); defaults to the worker-bridge spawn.
+    const spawn = this._spawnSignupWorker || spawnSignupWorker;
+    await spawn(workerDir, env, {
       onEvent: (parsed) => {
         if (parsed.kind === "result") {
           lastPayload = parsed.payload || parsed;
         }
         if (parsed.kind === "event" || parsed.kind === "result") {
           console.log(
-            `[${label}]    [worker] ${JSON.stringify(parsed.payload || parsed)}`
+            `[${label}]    [worker] ${JSON.stringify(scrubForLog(parsed.payload || parsed))}`
           );
         } else if (parsed.kind === "debug") {
           console.log(`[${label}]    [worker:debug] ${parsed.raw}`);

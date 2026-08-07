@@ -39,3 +39,30 @@ test("buildWorkerEnv emits QODER_* keys for the worker os.getenv", () => {
   assert.ok(env.QODER_SIGNUP_URL.includes("qoder.com"));
   assert.strictEqual(env.PURE_HTTP, "1");
 });
+
+test("add() never logs the PAT; result payload still reaches the provider", async () => {
+  const p = new QoderProvider({ mode: "local" }, {}, {});
+  const SECRET_PAT = "pt-super-secret-123";
+  // DI seam: fake the worker spawn, feed a real PAT-carrying result line to onEvent.
+  p._spawnSignupWorker = async (workerDir, env, { onEvent }) => {
+    onEvent(parseWorkerLine(
+      JSON.stringify({ kind: "result", ok: true, step: "register2", pat: SECRET_PAT, email: "a@b" })
+    ));
+  };
+
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...args) => logs.push(args.join(" "));
+  try {
+    const result = await p.add({ email: "a@b.com", password: "pw" }, {});
+    // Provider receives the PAT internally.
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.connection.data.apiKey, SECRET_PAT);
+  } finally {
+    console.log = origLog;
+  }
+
+  const all = logs.join("\n");
+  assert.ok(!all.includes(SECRET_PAT), "PAT leaked to console.log");
+  assert.ok(!all.includes("super-secret"), "PAT substring leaked to console.log");
+});
