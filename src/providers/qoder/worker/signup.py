@@ -74,9 +74,21 @@ def _body_json(r: Any) -> Any:
 
 
 def is_tmd_punish(body: Any) -> bool:
-    if not isinstance(body, dict):
-        return False
-    return TMD_IN_URL in json.dumps(body) or "x5secdata" in json.dumps(body)
+    """True when the response is a TMD jail / punish page instead of the clean
+    400 "Code required" OTP handshake.
+
+    The live punish response is an HTTP 200 HTML page carrying ``x5secdata``
+    (and/or ``_____tmd_____``); the JSON variant serializes a dict exposing the
+    same marker. Accept both a parsed dict (via _body_json) and raw str text
+    (via r.text) so detection also fires for the HTML punish that _body_json
+    cannot parse.
+    """
+    if isinstance(body, dict):
+        dumped = json.dumps(body)
+        return TMD_IN_URL in dumped or "x5secdata" in dumped
+    if isinstance(body, str):
+        return TMD_IN_URL in body or "x5secdata" in body
+    return False
 
 
 def signup_page(s: Any) -> bool:
@@ -275,12 +287,17 @@ def run() -> int:
         # required, or TMD punish if bx-ua fails).
         emit_step("register", "pending")
         r1 = register(s, email, password, name, proxy=proxy)
-        if is_tmd_punish(_body_json(r1)):
+        # Live punish is HTTP 200 HTML; check raw text too (dict-only missed it
+        # and wrongly routed punished sessions into the OTP poll).
+        if is_tmd_punish(r1.text) or is_tmd_punish(_body_json(r1)):
             emit_step("tmd", "warn")
             ok = False
             for _attempt in range(3):
                 r1 = register(s, email, password, name, proxy=proxy)
-                if r1.status_code != 200 or TMD_IN_URL in (r1.text or ""):
+                # Retry only on actual TMD punish (HTML or JSON marker). A
+                # normal 400 `Code required` here means the OTP flow is live —
+                # fall through to the poll instead of burning retries.
+                if is_tmd_punish(r1.text) or is_tmd_punish(_body_json(r1)):
                     continue
                 ok = True
                 break

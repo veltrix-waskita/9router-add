@@ -27,6 +27,25 @@ function scrubForLog(obj) {
 }
 
 /**
+ * Security: strip secret values out of arbitrary untrusted text (raw worker
+ * stdout lines, error strings) before it reaches console.log / error messages.
+ * The worker already masks 6-digit OTP runs, but a stray debug/error echo may
+ * still contain a PAT, password, apiKey, or authorization header.
+ * @param {string} text
+ * @returns {string} same text with every value of a secret key replaced.
+ */
+function redactSecrets(text) {
+  const s = String(text == null ? "" : text);
+  // Match `key: "value"`, `"key": "value"`, `key='value'` (JSON + Python repr),
+  // and unquoted `key=value` / `key: value` shapes for every secret key. The
+  // value is replaced wholesale; the leading `(?<![A-Za-z0-9_])` guard stops
+  // mangling plain words that merely contain a key substring (e.g. "compat").
+  const re =
+    /(?<![A-Za-z0-9_])(?:["'])?(password|pat|token|apiKey|authorization)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^,;&}\]\n]+)/gi;
+  return s.replace(re, (m, key) => `${key}:"[redacted]"`);
+}
+
+/**
  * Qoder provider — automates Qoder (qoder.com) AI coding account registration
  * + Personal Access Token (PAT) generation.
  *
@@ -140,10 +159,15 @@ class QoderProvider extends BaseProvider {
             `[${label}]    [worker] ${JSON.stringify(scrubForLog(parsed.payload || parsed))}`
           );
         } else if (parsed.kind === "debug") {
-          console.log(`[${label}]    [worker:debug] ${parsed.raw}`);
+          // Raw-line echo may carry a secret (e.g. an unparseable error line
+          // echoing the request body) — redact before logging.
+          console.log(`[${label}]    [worker:debug] ${redactSecrets(parsed.raw)}`);
         }
       },
-      timeoutMs: 300000,
+      // Worker worst case: OTP poll 180s + ~120s register/PAT/me. Keep a
+      // 420s cap so the worker's own verdict (e.g. otp-timeout) surfaces
+      // instead of a SIGKILL mid-flow.
+      timeoutMs: 420000,
     });
 
     return this._toConnectionResult(lastPayload, { email: this._accountEmail, password });
@@ -161,9 +185,11 @@ class QoderProvider extends BaseProvider {
     const result = payload || {};
     const pat = result.pat || result.token || null;
     if (result.ok !== true || !pat) {
-      throw new AuthError(
-        `qoder signup did not yield a PAT: ${String(result.error || "no-pat-result").slice(0, 200)}`
-      );
+      // result.error may echo server text that contains a secret (e.g. a
+      // register-step2 failure body with the password echoed back) — truncate
+      // AND redact before embedding it in the error message.
+      const reason = redactSecrets(String(result.error || "no-pat-result").slice(0, 200));
+      throw new AuthError(`qoder signup did not yield a PAT: ${reason}`);
     }
     // Prefer the email the worker actually registered (temp-mail address), falling
     // back to the provider's bookkeeping email.

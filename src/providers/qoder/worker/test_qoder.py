@@ -46,6 +46,18 @@ class TestHelpers(unittest.TestCase):
         self.assertFalse(is_tmd_punish({"errorCode": "BadRequest"}))
         self.assertFalse(is_tmd_punish({"errorMessage": "Code required"}))
 
+    def test_tmd_detect_html_str(self):
+        # Live punish is HTTP 200 HTML; _body_json cannot parse it, so
+        # detection must also work on the raw text (r.text).
+        self.assertTrue(
+            is_tmd_punish('<script>window.__tmd__; x5secdata="a1b2"</script>')
+        )
+        self.assertTrue(is_tmd_punish("_____tmd_____ blocked"))
+        self.assertFalse(is_tmd_punish('{"errorMessage":"Code required"}'))
+        self.assertFalse(is_tmd_punish("Code required"))
+        self.assertFalse(is_tmd_punish(None))
+        self.assertFalse(is_tmd_punish(123))
+
     def test_mask6(self):
         self.assertEqual(_mask6("code 123456 sent"), "code ****** sent")
         self.assertNotIn("707124", _mask6("707124"))
@@ -236,6 +248,48 @@ class TestRunFlow(unittest.TestCase):
             )
         self.assertEqual(rc, 1)
         self.assertEqual(lines[-1]["error"], "tmd-persistent")
+        self.assertEqual(s.post.call_count, 4)  # step1 + 3 retries
+
+    def test_run_tmd_html_then_otp_recovers(self):
+        # Live punish is HTTP 200 HTML (x5secdata page). A later retry returns
+        # the normal 400 "Code required" -> must break to the OTP poll and NOT
+        # burn 3 retries or emit a false tmd-persistent. Also proves HTML-text
+        # detection is what routes this through the tmd branch.
+        box = mock.Mock()
+        box.address = "x@ncaori.my.id"
+        box.create_account.return_value = box.address
+        box.wait_code.return_value = "482913"
+
+        s = mock.Mock()
+        s.get.side_effect = [
+            FakeResp(200, text="signup page"),            # signup_page
+            FakeResp(200, json_data={"id": "u1"}),         # login_me
+        ]
+        s.post.side_effect = [
+            FakeResp(200, text='<script>x5secdata="a1"</script>'),  # HTML punish
+            FakeResp(400, text='{"errorMessage":"Code required"}'),  # retry -> OTP live
+            FakeResp(200, text=""),                                   # step2
+            FakeResp(201, json_data={"token": "pt-secret-abc"}),      # PAT
+        ]
+
+        with mock.patch("signup._session", return_value=s), \
+             mock.patch("tempmail.EmailBox", return_value=box):
+            rc, lines = self._emit_lines(
+                run,
+                {
+                    "QODER_EMAIL": "",
+                    "QODER_PASSWORD": "pw",
+                    "QODER_EMAIL_SOURCE": "tempmail",
+                },
+            )
+
+        self.assertEqual(rc, 0)
+        tmd_warn = [l for l in lines if l.get("step") == "tmd"]
+        self.assertEqual(tmd_warn, [{"event": "step", "step": "tmd", "status": "warn"}])
+        results = [l for l in lines if l.get("kind") == "result"]
+        self.assertTrue(results[0]["ok"])
+        blob = json.dumps(lines)
+        self.assertNotIn("tmd-persistent", blob)
 
     def test_poll_otp_imap_path(self):
         with mock.patch("imap_otp.read_otp", return_value="482913") as read:
