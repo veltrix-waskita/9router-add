@@ -1847,8 +1847,6 @@ async function runAccounts(config, api, providerName, accounts) {
     if (ownsDash) dash.stop();
   }
 
-  // Qoder-specific stats: trial claim success + credits earned
-  const trialStats = summary.ok > 0 ? summary.ok - (summary.trialOk || 0) : 0;
   const sumLines = [
     tag("OK", String(summary.ok), summary.ok > 0 ? "brightGreen" : "dim"),
     tag("Fail", String(summary.fail), summary.fail > 0 ? "brightRed" : "dim"),
@@ -1858,8 +1856,9 @@ async function runAccounts(config, api, providerName, accounts) {
   ];
   if (providerName === "qoder") {
     sumLines.push(
-      tag("Pro Trial", `${summary.trialOk || 0} claimed`, (summary.trialOk || 0) > 0 ? "brightGreen" : "dim"),
-      tag("Credits", `${summary.credits || 0}`, (summary.credits || 0) > 0 ? "brightYellow" : "dim"),
+      tag("PATs", `${summary.ok} saved`, summary.ok > 0 ? "brightGreen" : "dim"),
+      tag("Trial", `${summary.trialOk || 0} claimed`, (summary.trialOk || 0) > 0 ? "brightYellow" : "dim"),
+      tag("Claim", "node . claim-qoder", "cyan"),
     );
   }
   sumLines.push(tag("Saved", `accounts/${providerName}/`, "yellow"));
