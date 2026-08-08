@@ -102,9 +102,12 @@ function generateAccounts({
   const emails = generateAliases(domain, n);
 
   // Track aliases for later audit (gitignored ideally).
+  const accountsBase = (config && config.accountsDir) || "accounts";
+  const providerDir = path.join(accountsBase, providerName);
+  try { fs.mkdirSync(providerDir, { recursive: true }); } catch {}
   const aliasPath =
     aliasFile ||
-    path.join(process.cwd(), "aliases.txt");
+    path.join(providerDir, "aliases.txt");
   try {
     appendAliasesToFile(aliasPath, emails);
   } catch (e) {

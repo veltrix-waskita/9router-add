@@ -167,9 +167,9 @@ test("afterAdd appends PAT-only + full-account sidecar files", async () => {
   await p.afterAdd(result);
   await p.afterAdd({ ok: true, connection: { data: { apiKey: "pt-other" } } });
 
-  const pats = fs.readFileSync(path.join(dir, "qoder-pats.txt"), "utf8");
+  const pats = fs.readFileSync(path.join(dir, "qoder", "qoder-pats.txt"), "utf8");
   assert.strictEqual(pats, "pt-abc-123\npt-abc-123\npt-other\n");
-  const accounts = fs.readFileSync(path.join(dir, "qoder-accounts.txt"), "utf8");
+  const accounts = fs.readFileSync(path.join(dir, "qoder", "qoder-accounts.txt"), "utf8");
   assert.ok(accounts.includes("qodertest@minom.my.id | Sam Lane | pt-abc-123"));
   // Never the password.
   assert.ok(!accounts.includes("pw"));
@@ -185,8 +185,8 @@ test("afterAdd skips sidecar write when result has no PAT", async () => {
   await p.afterAdd({ ok: false, error: "boom" });
   await p.afterAdd({ ok: true, connection: { data: {} } });
   await p.afterAdd();
-  assert.ok(!fs.existsSync(path.join(dir, "qoder-pats.txt")));
-  assert.ok(!fs.existsSync(path.join(dir, "qoder-accounts.txt")));
+  assert.ok(!fs.existsSync(path.join(dir, "qoder", "qoder-pats.txt")));
+  assert.ok(!fs.existsSync(path.join(dir, "qoder", "qoder-accounts.txt")));
 });
 
 test("add() passes trial claim fields through to the result", async () => {
@@ -243,7 +243,7 @@ test("afterAdd writes pat-trial.json ONLY when trial===true", async () => {
   });
 
   // Verify trial file exists with correct content
-  const trialFile = path.join(dir, "qoder-pat-trial.json");
+  const trialFile = path.join(dir, "qoder", "qoder-pat-trial.json");
   assert.ok(fs.existsSync(trialFile));
   const lines = fs.readFileSync(trialFile, "utf8").split("\n").filter(Boolean);
   assert.strictEqual(lines.length, 1, "should contain exactly 1 trial line");
@@ -257,6 +257,6 @@ test("afterAdd writes pat-trial.json ONLY when trial===true", async () => {
   assert.ok(!JSON.stringify(entry).includes("pw"));
 
   // Regular sidecars still written
-  assert.ok(fs.existsSync(path.join(dir, "qoder-pats.txt")));
-  assert.ok(fs.existsSync(path.join(dir, "qoder-accounts.txt")));
+  assert.ok(fs.existsSync(path.join(dir, "qoder", "qoder-pats.txt")));
+  assert.ok(fs.existsSync(path.join(dir, "qoder", "qoder-accounts.txt")));
 });

@@ -1,5 +1,7 @@
 "use strict";
 
+const fs = require("fs");
+const path = require("path");
 const { BaseProvider } = require("../../base/provider");
 const { QuotaError } = require("../../base/errors");
 
@@ -294,17 +296,49 @@ class GrokCliProvider extends BaseProvider {
   }
 
   /**
-   * Lifecycle: afterAdd — rename the connection.
-   * @param {{id?: string}} result
+   * Lifecycle: afterAdd — rename the connection + persist full account JSONL.
+   *
+   * Writes accounts/grok-cli/grok-accounts.jsonl with full connection data
+   * (email, id, accessToken, refreshToken, expiresAt, scope, displayName).
+   * Non-fatal: file write failure does not fail the signup.
+   * @param {{id?: string, connection?: object}} result
    */
   async afterAdd(result) {
+    // 1. Rename connection (existing behavior)
     if (result && result.id) {
       try {
         await this.renameConnection(result.id);
       } catch (e) {
-        // Non-fatal: connection was already established.
         console.log(`[grok-cli] Warning: rename failed for ${result.id}: ${e.message}`);
       }
+    }
+
+    // 2. Persist full account JSONL to accounts/grok-cli/
+    if (!result || !result.connection) return;
+    const conn = result.connection;
+    const data = conn.data || {};
+    if (!data.accessToken) return;
+
+    const dir = path.join(this.config.accountsDir || "accounts", "grok-cli");
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const entry = {
+        email: conn.email || data.email || "",
+        id: conn.id || result.id || "",
+        displayName: data.displayName || "",
+        accessToken: data.accessToken || "",
+        refreshToken: data.refreshToken || "",
+        expiresAt: data.expiresAt || "",
+        scope: data.scope || "",
+        createdAt: data.createdAt || new Date().toISOString(),
+      };
+      fs.appendFileSync(
+        path.join(dir, "grok-accounts.jsonl"),
+        JSON.stringify(entry) + "\n",
+        { mode: 0o600 }
+      );
+    } catch (err) {
+      console.warn(`[grok-cli] could not append account JSONL: ${err.message}`);
     }
   }
 

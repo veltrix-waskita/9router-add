@@ -825,8 +825,11 @@ async function promptAutoAccounts(rl, config, providerName) {
     .replace(/[:.]/g, "-")
     .replace("T", "_")
     .slice(0, 19);
+  const accountsBase = config.accountsDir || "accounts";
+  const providerDir = path.join(accountsBase, providerName);
+  try { fs.mkdirSync(providerDir, { recursive: true }); } catch {}
   const defaultSave = path.join(
-    process.cwd(),
+    providerDir,
     `generated-accounts-${providerName}-${stamp}.json`
   );
   const saveFile = await ask(rl, "Simpan credentials ke file", {
@@ -1803,6 +1806,7 @@ async function runAccounts(config, api, providerName, accounts) {
     tag("Fail", String(summary.fail), summary.fail > 0 ? "brightRed" : "dim"),
     tag("Skip", String(summary.skip), summary.skip > 0 ? "brightYellow" : "dim"),
     tag("Total", String(total), "cyan"),
+    tag("Saved", `accounts/${providerName}/`, "yellow"),
   ];
   if (summary.errors.length) {
     sumLines.push("");
@@ -1974,6 +1978,11 @@ async function main() {
         value: "grok-cli",
         label: "grok-cli",
         hint: "email + IMAP OTP / temp-mail (pure-HTTP)",
+      },
+      {
+        value: "qoder",
+        label: "qoder",
+        hint: "email + IMAP OTP / temp-mail + Pro Trial claim",
       },
     ]);
     const info = PROVIDER_INFO[providerName];

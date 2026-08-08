@@ -18,12 +18,12 @@ captcha-solver/venv/
 captcha-solver/.venv/
 captcha-solver/solver.env
 
-# Qoder sidecar outputs — contain live PATs (0600, appended per success).
-/qoder-pats.txt
-/qoder-accounts.txt
-# Trial filtering files — contains PRO_TRIAL accounts with full details (0600)
-/qoder-trial-log.jsonl
-/qoder-pat-trial.json
+# Account output directories — contain live PATs/tokens (0600, appended per success)
+# Keep .gitkeep files so the directory structure is tracked
+/accounts/*
+!/accounts/.gitkeep
+!/accounts/*/
+!/accounts/*/.gitkeep
 
 # Qoder trial claim tool (vendored — contains encrypted blob + machine creds pool)
 /qoder-trial/qoder_creds_10k.json

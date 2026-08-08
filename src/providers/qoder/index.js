@@ -250,10 +250,12 @@ class QoderProvider extends BaseProvider {
     const pat = connection.data && connection.data.apiKey;
     if (!pat) return;
 
-    const dir = this.config.accountsDir || process.cwd();
+    const dir = path.join(this.config.accountsDir || "accounts", "qoder");
 
     // 1. Original sidecars (via super)
     try {
+      fs.mkdirSync(dir, { recursive: true });
+
       await super.afterAdd(result);
     } catch {
       /* ignore */
