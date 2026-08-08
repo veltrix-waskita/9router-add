@@ -314,9 +314,22 @@ class GrokCliProvider extends BaseProvider {
     }
 
     // 2. Persist full account JSONL to accounts/grok-cli/
+    // The connection object from add() has {id, provider} but tokens are in
+    // 9router DB — read from local SQLite directly (API strips tokens).
     if (!result || !result.connection) return;
     const conn = result.connection;
-    const data = conn.data || {};
+    let data = conn.data || {};
+
+    // Fetch full connection data from local DB (tokens are stripped by API)
+    if (!data.accessToken && conn.id) {
+      try {
+        const { findById } = require("../../core/db");
+        const stored = await findById(this.config, conn.id);
+        if (stored && stored.data) data = stored.data;
+        if (!conn.email && stored && stored.email) conn.email = stored.email;
+      } catch { /* non-fatal — DB read may fail on remote */ }
+    }
+
     if (!data.accessToken) return;
 
     const dir = path.join(this.config.accountsDir || "accounts", "grok-cli");
