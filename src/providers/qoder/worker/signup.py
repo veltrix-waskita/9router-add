@@ -608,8 +608,8 @@ def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict
     # Trial claim needs MULTIPLE attempts with ~30s cooldown between them
     # (qoder.com anti-fraud: fresh account usually shows PLAN_TIER_FREE for a
     # while before the trial grant becomes claimable). Loop until active.
-    MAX_ATTEMPTS = int(os.getenv("QODER_CLAIM_MAX_ATTEMPTS", "5"))
-    COOLDOWN_S = int(os.getenv("QODER_CLAIM_COOLDOWN_S", "30"))
+    MAX_ATTEMPTS = int(os.getenv("QODER_CLAIM_MAX_ATTEMPTS", "10"))
+    COOLDOWN_S = int(os.getenv("QODER_CLAIM_COOLDOWN_S", "60"))
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
