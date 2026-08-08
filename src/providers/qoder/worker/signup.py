@@ -747,9 +747,19 @@ def run() -> int:
             return 1
         me = login_me(s)
 
-        # ===== STEP: Best-effort background claim to Pro Trial 300 credits =====
-        # Spawn dual_claim.py subprocess — NEVER blocks signup on failure
-        trial_active, claim_result = run_background_claim(pat, proxy=proxy)
+        # ===== STEP: OPTIONAL in-worker claim (default OFF) =====
+        # 2-phase flow: accounts must AGE before qoder.com grants Pro Trial.
+        # In-worker claim (15 attempts) just wastes time on fresh accounts.
+        # Enable with env QODER_CLAIM_IN_WORKER=1, or claim separately via:
+        #   node . claim-qoder
+        if os.getenv("QODER_CLAIM_IN_WORKER", "0") == "1":
+            trial_active, claim_result = run_background_claim(pat, proxy=proxy)
+        else:
+            emit_step("background_claim", "skipped", reason="claim-via-claim-qoder")
+            claim_result = {
+                "trial": False, "ultimate": False,
+                "qwen800": False, "qwen2000": False, "credits": 0,
+            }
 
         # Merge claim result into final payload so afterAdd() can filter trial accounts
         result_kwargs = {
