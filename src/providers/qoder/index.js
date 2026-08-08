@@ -244,10 +244,11 @@ class QoderProvider extends BaseProvider {
    *
    * @param {{ok:boolean, connection?:object, trial?:boolean, ultimate?:boolean, qwen800?:boolean, qwen2000?:boolean, credits?:number}} result - add() result.
    *
-   * Output (user requirement — qoder has exactly 2 outputs):
+   * Output (2-phase flow):
    *   1. generated-accounts-qoder-*.json — full credentials (runner/CLI writes)
-   *   2. accounts/qoder/qoder-pats.txt    — PAT only, ONE line per PAT, ONLY for
-   *      accounts where worker reported trial===true (Pro Trial successfully claimed)
+   *   2. accounts/qoder/qoder-pats.txt    — ALL PATs (one per line) from signup.
+   *      Trial claim happens SEPARATELY via `node . claim-qoder` (PATs need
+   *      the account to age before qoder.com grants Pro Trial).
    */
   async afterAdd(result) {
     if (!result || result.ok !== true || !result.connection) return;
@@ -256,18 +257,60 @@ class QoderProvider extends BaseProvider {
     if (!pat) return;
 
     const dir = path.join(this.config.accountsDir || "accounts", "qoder");
-
-    // PAT-only file — ONLY for accounts that successfully claimed Pro Trial
-    // (user requirement: qoder output = credentials JSON + PATs of trial accounts only)
-    const isTrialed = (result.trial ?? false) === true;
-    if (!isTrialed) return;
-
     try {
       fs.mkdirSync(dir, { recursive: true });
       fs.appendFileSync(path.join(dir, "qoder-pats.txt"), `${pat}\n`, { mode: 0o600 });
     } catch (err) {
       console.warn(`[qoder] could not append PAT file: ${err.message}`);
     }
+  }
+
+  /**
+   * Claim Pro Trial for all PATs in accounts/qoder/qoder-pats.txt.
+   * Skips PATs that are already PRO_TRIAL (dual_claim reports ACTIVE).
+   * Reads PATs, runs dual_claim --pool per PAT, writes claimed PATs to
+   * accounts/qoder/qoder-pats-trial.txt.
+   *
+   * @param {{attempts?: number}} [opts]
+   * @returns {Promise<{claimed: string[], failed: string[], already: string[]}>}
+   */
+  async claimAllPats(opts = {}) {
+    const dir = path.join(this.config.accountsDir || "accounts", "qoder");
+    const patsFile = path.join(dir, "qoder-pats.txt");
+    if (!fs.existsSync(patsFile)) {
+      throw new Error(`No PATs file: ${patsFile} — run 'node . add qoder' first`);
+    }
+    const pats = fs.readFileSync(patsFile, "utf8").split("\n").map(s => s.trim()).filter(Boolean);
+    const attempts = opts.attempts || 3;
+
+    const claimed = [];
+    const failed = [];
+    const already = [];
+
+    for (const pat of pats) {
+      const result = await claimTrialForPat(pat, attempts);
+      if (result.trial) {
+        claimed.push(pat);
+        console.log(`✅ ${pat.slice(0, 24)}... trial ACTIVE`);
+      } else if (result.already) {
+        already.push(pat);
+        console.log(`↷ ${pat.slice(0, 24)}... already PRO_TRIAL`);
+      } else {
+        failed.push(pat);
+        console.log(`❌ ${pat.slice(0, 24)}... ${result.error || "PLAN_TIER_FREE"}`);
+      }
+    }
+
+    // Write claimed PATs to trial file
+    if (claimed.length) {
+      fs.appendFileSync(
+        path.join(dir, "qoder-pats-trial.txt"),
+        claimed.map(p => p + "\n").join(""),
+        { mode: 0o600 }
+      );
+    }
+
+    return { claimed, failed, already };
   }
 
   /**
@@ -291,6 +334,71 @@ class QoderProvider extends BaseProvider {
       }
     }
   }
+}
+
+/**
+ * Claim Pro Trial for one PAT via the vendored dual_claim.py (--pool).
+ *
+ * Runs the claim tool up to `attempts` times. Fresh accounts usually show
+ * PLAN_TIER_FREE until qoder.com grants the trial (needs the account to age).
+ * Returns:
+ *   {trial: true}           — Pro Trial ACTIVE
+ *   {trial: false, already: true} — already PRO_TRIAL (skip)
+ *   {trial: false, error}   — still FREE / claim failed
+ *
+ * @param {string} pat
+ * @param {number} [attempts=3]
+ * @returns {Promise<{trial: boolean, already?: boolean, error?: string}>}
+ */
+async function claimTrialForPat(pat, attempts = 3) {
+  const { execFile } = require("child_process");
+  const os = require("os");
+
+  const repoRoot = path.join(__dirname, "..", "..", "..");
+  const trialDir = path.join(repoRoot, "qoder-trial");
+  const venvPython = path.join(__dirname, "worker", ".venv", "bin", "python3");
+  const dualClaim = path.join(trialDir, "dual_claim.py");
+
+  if (!fs.existsSync(dualClaim) || !fs.existsSync(venvPython)) {
+    return { trial: false, error: "qoder-trial assets missing (dual_claim.py / venv)" };
+  }
+
+  const env = {
+    ...process.env,
+    QODER_IDENTITY_DIR: trialDir,
+    QODER_RUNTIME_INFO: path.join(trialDir, "runtime-info-linux-x64"),
+    QODER_SPOOF_SO: path.join(trialDir, "hooks", "spoof_hw.so"),
+  };
+
+  const runOnce = () => new Promise((resolve) => {
+    execFile(
+      venvPython,
+      [dualClaim, "--pat", pat, "--pool", "--attempts", "1"],
+      { cwd: trialDir, env, timeout: 120000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        const out = `${stdout || ""}\n${stderr || ""}`;
+        resolve({ out, err });
+      }
+    );
+  });
+
+  for (let i = 0; i < attempts; i++) {
+    const { out, err } = await runOnce();
+    // Already trial (from previous claim) — skip
+    if (/ACTIVE! Plan: PLAN_TIER_PRO_TRIAL/.test(out)) {
+      return { trial: true };
+    }
+    if (/Waiting 30 seconds/.test(out)) {
+      return { trial: true };
+    }
+    if (/Already claimed|already claimed/i.test(out)) {
+      return { trial: false, already: true };
+    }
+    if (i < attempts - 1) {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  return { trial: false, error: "PLAN_TIER_FREE (account may need to age)" };
 }
 
 module.exports = QoderProvider;

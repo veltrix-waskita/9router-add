@@ -1,1 +1,3 @@
+pt-testdummy-d34db33f
+pt-super-secret-123
 pt-trial-test-d34db33f

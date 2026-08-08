@@ -118,7 +118,7 @@ async function run(argv, config, api, providers) {
 
   if (!command) {
     console.log("Usage: node . <command> <provider> [options]");
-    console.log("Commands: add, inspect, delete, list, batch");
+    console.log("Commands: add, inspect, delete, list, batch, claim-qoder");
     console.log("Providers:", Object.keys(providers).join(", "));
     return;
   }
@@ -139,6 +139,38 @@ async function run(argv, config, api, providers) {
         }
       }
     }
+    return;
+  }
+
+  // claim-qoder is a provider-less command (claims Pro Trial for all qoder PATs)
+  if (command === "claim-qoder") {
+    const Provider = providers["qoder"];
+    if (!Provider) {
+      console.error("qoder provider not loaded");
+      process.exit(1);
+    }
+    const services = loadServices(config);
+    config._provider = "qoder";
+    const finalConfig = {
+      ...config,
+      providerConfig: (config.providers && config.providers["qoder"]) || {},
+    };
+    const provider = new Provider(finalConfig, api, services);
+    const attempts = Number(args.attempts) || 3;
+    console.log(`Claiming Pro Trial for qoder PATs (${attempts} attempts each)...`);
+    const result = await provider.claimAllPats({ attempts });
+    console.log(
+      JSON.stringify(
+        {
+          claimed: result.claimed.length,
+          already: result.already.length,
+          failed: result.failed.length,
+          trialFile: "accounts/qoder/qoder-pats-trial.txt",
+        },
+        null,
+        2
+      )
+    );
     return;
   }
 
@@ -198,6 +230,25 @@ async function run(argv, config, api, providers) {
           console.error(`[${i + 1}/${accounts.length}] ERROR: ${e.message}`);
         }
       }
+      break;
+    }
+    case "claim-qoder": {
+      // Claim Pro Trial for all PATs in accounts/qoder/qoder-pats.txt
+      const attempts = Number(args.attempts) || 3;
+      if (typeof provider.claimAllPats !== "function") {
+        console.error(`Provider ${providerName} does not support claim-qoder`);
+        process.exit(1);
+      }
+      console.log(`Claiming Pro Trial for qoder PATs (${attempts} attempts each)...`);
+      const result = await provider.claimAllPats({ attempts });
+      console.log(
+        JSON.stringify({
+          claimed: result.claimed.length,
+          already: result.already.length,
+          failed: result.failed.length,
+          trialFile: "accounts/qoder/qoder-pats-trial.txt",
+        }, null, 2)
+      );
       break;
     }
     default:
