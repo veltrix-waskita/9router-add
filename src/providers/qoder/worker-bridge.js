@@ -103,6 +103,15 @@ function buildWorkerEnv({ credentials = {}, config = {}, options = {} }) {
       "http://127.0.0.1:8877/solve"
   );
 
+  // 2-phase flow: in-worker trial claim default OFF (accounts need to age).
+  // Enable via config provider key, options, or env — else worker skips.
+  const claimInWorker =
+    (options && options.claimInWorker) ||
+    providerCfg.claimInWorker ||
+    process.env.QODER_CLAIM_IN_WORKER ||
+    "0";
+  env.QODER_CLAIM_IN_WORKER = String(claimInWorker === true || claimInWorker === "1" ? "1" : "0");
+
   // IMAP env vars only for imap mode (mirrors the kiro bridge). The worker's
   // imap_otp.read_otp fails fast when user/password are empty, so config.imap
   // must be wired through for the QODER_EMAIL_SOURCE=imap path to work at all.
