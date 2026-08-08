@@ -177,14 +177,20 @@ function printBanner() {
       style.gold(" ◆")
   );
   console.log(
-    style.dim("         antigravity") +
+    style.dim("   Providers: ") +
+      style.brightYellow("antigravity") +
       style.gold(" · ") +
-      style.dim("kiro") +
+      style.brightYellow("kiro") +
       style.gold(" · ") +
-      style.dim("grok-cli") +
+      style.brightYellow("grok-cli") +
       style.gold(" · ") +
-      style.dim("qoder") +
+      style.brightYellow("qoder") +
       style.dim("  (sequential batch)")
+  );
+  console.log(
+    style.dim("   Output:    ") +
+      style.cyan("accounts/<provider>/") +
+      style.dim("  ·  credentials JSON + PAT (qoder) / tokens JSONL (grok)")
   );
   console.log();
 }
@@ -1552,13 +1558,26 @@ class AppShell {
 
     const lines = [top];
 
-    // Header meta
+    // Header meta — rich status line
+    const phaseBadge =
+      this.phase === "run"
+        ? style.brightGreen("● RUNNING")
+        : this.phase === "summary"
+          ? style.brightYellow("● SUMMARY")
+          : style.brightCyan("● WIZARD");
+    const modeBadge =
+      String(this.mode) === "local"
+        ? style.brightGreen("LOCAL")
+        : String(this.mode) === "remote"
+          ? style.brightYellow("REMOTE")
+          : style.dim(String(this.mode) || "—");
     lines.push(
       row(
-        `  ${style.cyan("Provider")} ${style.brightYellow(truncVis(this.provider, 14))}` +
-          `  ${style.cyan("Mode")} ${style.brightCyan(String(this.mode))}` +
-          `  ${style.cyan("Proxy")} ${style.yellow(truncVis(this.proxyLabel, 16))}` +
-          `  ${style.dim(this._elapsed())}`
+        `  ${phaseBadge}` +
+          `  ${style.cyan("Provider")} ${style.brightYellow(truncVis(this.provider, 14))}` +
+          `  ${style.cyan("Mode")} ${modeBadge}` +
+          `  ${style.cyan("Proxy")} ${style.yellow(truncVis(this.proxyLabel, 12))}` +
+          `  ${style.dim("⏱ " + this._elapsed())}`
       )
     );
 
@@ -1583,7 +1602,7 @@ class AppShell {
 
     lines.push(mid);
 
-    // Working + progress
+    // Working + progress — richer run info
     if (this.phase === "run" || this.total > 0) {
       const done = this.ok + this.fail + this.skip;
       const progressLabel = this.index
@@ -1592,20 +1611,29 @@ class AppShell {
       const bar = this._bar(
         done,
         Math.max(1, this.total || 1),
-        Math.min(20, Math.max(8, inner - 48))
+        Math.min(22, Math.max(10, inner - 52))
       );
+      // Rate + ETA: accounts per second from elapsed time
+      const elapsedSec = Math.max(1, Math.floor((Date.now() - this.startedAt) / 1000));
+      const rate = (done / elapsedSec).toFixed(2);
+      const remaining = Math.max(0, (this.total || done) - done);
+      const eta = remaining > 0 && rate > 0
+        ? `${Math.ceil(remaining / rate)}s`
+        : "—";
       lines.push(
         row(
           `  ${style.cyan("Progress")} ${style.brightWhite(progressLabel)} ${bar}` +
-            ` ${style.brightGreen("OK:" + this.ok)}` +
-            ` ${style.brightRed("FAIL:" + this.fail)}` +
-            ` ${style.yellow("SKIP:" + this.skip)}`
+            ` ${style.brightGreen("✓" + this.ok)}` +
+            ` ${style.brightRed("✗" + this.fail)}` +
+            ` ${style.yellow("↷" + this.skip)}`
         )
       );
       lines.push(
         row(
-          `  ${style.cyan("Account ")} ${style.brightCyan(truncVis(this.email, Math.max(18, inner - 30)))}` +
-            `  ${style.dim(this.proxy)}`
+          `  ${style.cyan("Account  ")} ${style.brightCyan(truncVis(this.email, Math.max(16, inner - 34)))}` +
+            `  ${style.dim(this.proxy)}` +
+            `  ${style.cyan("Rate")} ${style.brightWhite(rate + "/s")}` +
+            `  ${style.cyan("ETA")} ${style.brightWhite(eta)}`
         )
       );
     }
@@ -1616,6 +1644,16 @@ class AppShell {
     );
 
     lines.push(mid);
+    // Output destination (informative) — provider-specific paths
+    if (this.provider && this.provider !== "—") {
+      lines.push(
+        row(
+          `  ${style.gold("▸ OUTPUT ")}` +
+            `${style.dim("accounts/")}${style.brightYellow(this.provider)}${style.dim("/")}` +
+            `${this.provider === "qoder" ? style.dim("  qoder-pats.txt · credentials JSON") : this.provider === "grok-cli" ? style.dim("  grok-accounts.jsonl") : ""}`
+        )
+      );
+    }
     lines.push(row(`  ${style.gold("LOG")}`));
 
     const logSlots = this.maxLogs;
@@ -1722,7 +1760,7 @@ async function runAccounts(config, api, providerName, accounts) {
     providerConfig: (config.providers && config.providers[providerName]) || {},
   };
 
-  const summary = { ok: 0, fail: 0, skip: 0, errors: [] };
+  const summary = { ok: 0, fail: 0, skip: 0, errors: [], trialOk: 0, credits: 0 };
   const total = accounts.length;
 
   // Infer proxy label from first account (plan already applied).
@@ -1779,6 +1817,11 @@ async function runAccounts(config, api, providerName, accounts) {
           dash.finishAccount("skip", result.reason || "skipped");
         } else if (result && result.ok !== false) {
           summary.ok += 1;
+          // Qoder Pro Trial claim stats
+          if (result.trial) {
+            summary.trialOk = (summary.trialOk || 0) + 1;
+            summary.credits = (summary.credits || 0) + Number(result.credits || 300);
+          }
           const id =
             (result.connection && result.connection.id) || result.id || "?";
           // Prefer real email if tempmail worker updated it on the provider.
@@ -1803,13 +1846,22 @@ async function runAccounts(config, api, providerName, accounts) {
     if (ownsDash) dash.stop();
   }
 
+  // Qoder-specific stats: trial claim success + credits earned
+  const trialStats = summary.ok > 0 ? summary.ok - (summary.trialOk || 0) : 0;
   const sumLines = [
     tag("OK", String(summary.ok), summary.ok > 0 ? "brightGreen" : "dim"),
     tag("Fail", String(summary.fail), summary.fail > 0 ? "brightRed" : "dim"),
     tag("Skip", String(summary.skip), summary.skip > 0 ? "brightYellow" : "dim"),
     tag("Total", String(total), "cyan"),
-    tag("Saved", `accounts/${providerName}/`, "yellow"),
+    "",
   ];
+  if (providerName === "qoder") {
+    sumLines.push(
+      tag("Pro Trial", `${summary.trialOk || 0} claimed`, (summary.trialOk || 0) > 0 ? "brightGreen" : "dim"),
+      tag("Credits", `${summary.credits || 0}`, (summary.credits || 0) > 0 ? "brightYellow" : "dim"),
+    );
+  }
+  sumLines.push(tag("Saved", `accounts/${providerName}/`, "yellow"));
   if (summary.errors.length) {
     sumLines.push("");
     for (const e of summary.errors) {
@@ -1931,10 +1983,13 @@ async function main() {
   APP.setContent("BOOT", [
     tag("App", "9router-add", "brightYellow"),
     tag("UI", "CLI dashboard", "cyan"),
-    tag("Providers", "antigravity · kiro · grok-cli", "dim"),
+    tag("Providers", "antigravity · kiro · grok-cli · qoder", "brightYellow"),
+    tag("Output", "accounts/<provider>/ (gitignored)", "yellow"),
+    tag("Solver", ":8877 aliyun + turnstile", "cyan"),
     "",
     style.dim("  Header · steps · panel · working · log"),
     style.dim("  Secret disaring · log disingkat"),
+    style.dim("  PAT trial-only: qoder-pats.txt (Pro Trial accounts)"),
   ]);
   APP.setWork("start captcha-solver…");
   APP.note("dashboard siap", "info");
