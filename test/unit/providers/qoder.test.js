@@ -147,13 +147,13 @@ test("add() never logs the PAT; result payload still reaches the provider", asyn
   assert.ok(!all.includes(SECRET_PAT), "PAT leaked to console.log");
   assert.ok(!all.includes("super-secret"), "PAT substring leaked to console.log");
 });
-test("afterAdd appends PAT-only + full-account sidecar files", async () => {
+test("afterAdd writes PAT-only file ONLY for trial===true accounts", async () => {
   const os = require("os");
   const path = require("path");
   const fs = require("fs");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qoder-pats-"));
   const p = new QoderProvider({ mode: "local", accountsDir: dir }, {}, {});
-  const result = {
+  const trialResult = {
     ok: true,
     connection: {
       provider: "qoder",
@@ -162,18 +162,26 @@ test("afterAdd appends PAT-only + full-account sidecar files", async () => {
       authType: "apikey",
       data: { apiKey: "pt-abc-123", name: "Sam Lane" },
     },
+    trial: true,
+    credits: 300,
   };
-  await p.afterAdd(result);
-  await p.afterAdd(result);
+  // trial===true → PAT written
+  await p.afterAdd(trialResult);
+  // trial=false → PAT NOT written
+  await p.afterAdd({
+    ok: true,
+    connection: { data: { apiKey: "pt-notrial" } },
+    trial: false,
+  });
+  // no trial field → PAT NOT written
   await p.afterAdd({ ok: true, connection: { data: { apiKey: "pt-other" } } });
 
   const pats = fs.readFileSync(path.join(dir, "qoder", "qoder-pats.txt"), "utf8");
-  assert.strictEqual(pats, "pt-abc-123\npt-abc-123\npt-other\n");
-  const accounts = fs.readFileSync(path.join(dir, "qoder", "qoder-accounts.txt"), "utf8");
-  assert.ok(accounts.includes("qodertest@minom.my.id | Sam Lane | pt-abc-123"));
-  // Never the password.
-  assert.ok(!accounts.includes("pw"));
-  assert.ok(!pats.includes("pw"));
+  assert.strictEqual(pats, "pt-abc-123\n");
+  // No accounts.txt / trial json files at all
+  assert.ok(!fs.existsSync(path.join(dir, "qoder", "qoder-accounts.txt")));
+  assert.ok(!fs.existsSync(path.join(dir, "qoder", "qoder-trial-log.jsonl")));
+  assert.ok(!fs.existsSync(path.join(dir, "qoder", "qoder-pat-trial.json")));
 });
 
 test("afterAdd skips sidecar write when result has no PAT", async () => {
@@ -215,48 +223,15 @@ test("add() passes trial claim fields through to the result", async () => {
   }
 });
 
-test("afterAdd writes pat-trial.json ONLY when trial===true", async () => {
+test("afterAdd skips PAT write when result has no PAT or not trial", async () => {
   const os = require("os");
   const path = require("path");
   const fs = require("fs");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qoder-trial-"));
   const p = new QoderProvider({ mode: "local", accountsDir: dir }, {}, {});
-
-  // Success with trial → should write trial file
-  await p.afterAdd({
-    ok: true,
-    connection: { provider: "qoder", email: "trial@minom.my.id", password: "pw",
-      authType: "apikey", data: { apiKey: "pt-trial-abc", name: "Trial User" } },
-    trial: true,
-    ultimate: false,
-    qwen800: true,
-    credits: 1100,
-  });
-
-  // Success without trial → should NOT write trial file
-  await p.afterAdd({
-    ok: true,
-    connection: { provider: "qoder", email: "notrial@minom.my.id", password: "pw",
-      authType: "apikey", data: { apiKey: "pt-notrial-xyz", name: "No Trial" } },
-    trial: false,
-    credits: 0,
-  });
-
-  // Verify trial file exists with correct content
-  const trialFile = path.join(dir, "qoder", "qoder-pat-trial.json");
-  assert.ok(fs.existsSync(trialFile));
-  const lines = fs.readFileSync(trialFile, "utf8").split("\n").filter(Boolean);
-  assert.strictEqual(lines.length, 1, "should contain exactly 1 trial line");
-  const entry = JSON.parse(lines[0]);
-  assert.strictEqual(entry.email, "trial@minom.my.id");
-  assert.strictEqual(entry.pat, "pt-trial-abc");
-  assert.strictEqual(entry.claims.trial, true);
-  assert.strictEqual(entry.claims.qwen800, true);
-  assert.strictEqual(entry.claims.credits, 1100);
-  // never the password
-  assert.ok(!JSON.stringify(entry).includes("pw"));
-
-  // Regular sidecars still written
-  assert.ok(fs.existsSync(path.join(dir, "qoder", "qoder-pats.txt")));
-  assert.ok(fs.existsSync(path.join(dir, "qoder", "qoder-accounts.txt")));
+  await p.afterAdd({ ok: false, error: "boom" });
+  await p.afterAdd({ ok: true, connection: { data: {} } });
+  await p.afterAdd({ ok: true, connection: { data: { apiKey: "pt-x" } }, trial: false });
+  await p.afterAdd();
+  assert.ok(!fs.existsSync(path.join(dir, "qoder", "qoder-pats.txt")));
 });

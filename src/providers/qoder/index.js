@@ -243,6 +243,11 @@ class QoderProvider extends BaseProvider {
    * Non-fatal: failures do not block signup.
    *
    * @param {{ok:boolean, connection?:object, trial?:boolean, ultimate?:boolean, qwen800?:boolean, qwen2000?:boolean, credits?:number}} result - add() result.
+   *
+   * Output (user requirement — qoder has exactly 2 outputs):
+   *   1. generated-accounts-qoder-*.json — full credentials (runner/CLI writes)
+   *   2. accounts/qoder/qoder-pats.txt    — PAT only, ONE line per PAT, ONLY for
+   *      accounts where worker reported trial===true (Pro Trial successfully claimed)
    */
   async afterAdd(result) {
     if (!result || result.ok !== true || !result.connection) return;
@@ -252,61 +257,16 @@ class QoderProvider extends BaseProvider {
 
     const dir = path.join(this.config.accountsDir || "accounts", "qoder");
 
-    // 1. Original sidecars (via super)
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-
-      await super.afterAdd(result);
-    } catch {
-      /* ignore */
-    }
-
-    // 2. Full-account line (always)
-    try {
-      const name = (connection.data && connection.data.name) || "";
-      const accountLine = `${connection.email} | ${name} | ${pat}\n`;
-      fs.appendFileSync(path.join(dir, "qoder-accounts.txt"), accountLine, { mode: 0o600 });
-      // Append to pats-only file too
-      fs.appendFileSync(path.join(dir, "qoder-pats.txt"), `${pat}\n`, { mode: 0o600 });
-    } catch (err) {
-      console.warn(`[qoder] could not append account/PAT sidecar files: ${err.message}`);
-    }
-
-    // 3. TRIAL FILE — only if Pro Trial was claimed successfully (trial===true)
+    // PAT-only file — ONLY for accounts that successfully claimed Pro Trial
+    // (user requirement: qoder output = credentials JSON + PATs of trial accounts only)
     const isTrialed = (result.trial ?? false) === true;
     if (!isTrialed) return;
 
-    const email = connection.email || "";
-    const claims = {
-      trial: true,
-      ultimate: Boolean(result.ultimate),
-      qwen800: Boolean(result.qwen800),
-      qwen2000: Boolean(result.qwen2000),
-      credits: Number(result.credits ?? 0),
-    };
-
-    // File 3a: JSONL log for programmatic access
-    const trialJsonlFile = path.join(dir, "qoder-trial-log.jsonl");
     try {
-      const entry = {
-        email,
-        pat,
-        claims,
-        timestamp: new Date().toISOString(),
-        source: "qoder-provider-auto",
-      };
-      fs.appendFileSync(trialJsonlFile, JSON.stringify(entry) + "\n", { mode: 0o600 });
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, "qoder-pats.txt"), `${pat}\n`, { mode: 0o600 });
     } catch (err) {
-      console.warn(`[qoder] could not append trial JSONL file ${trialJsonlFile}: ${err.message}`);
-    }
-
-    // File 3b: JSONL format (one JSON object per line) — consistent with JSONL log
-    const trialJsonFile = path.join(dir, "qoder-pat-trial.json");
-    try {
-      const entry = { email, pat, claims, timestamp: new Date().toISOString() };
-      fs.appendFileSync(trialJsonFile, JSON.stringify(entry) + "\n", { mode: 0o600 });
-    } catch (err) {
-      console.warn(`[qoder] could not append trial JSON file ${trialJsonFile}: ${err.message}`);
+      console.warn(`[qoder] could not append PAT file: ${err.message}`);
     }
   }
 

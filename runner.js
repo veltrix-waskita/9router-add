@@ -182,6 +182,8 @@ function printBanner() {
       style.dim("kiro") +
       style.gold(" · ") +
       style.dim("grok-cli") +
+      style.gold(" · ") +
+      style.dim("qoder") +
       style.dim("  (sequential batch)")
   );
   console.log();
