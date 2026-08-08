@@ -29,3 +29,10 @@ captcha-solver/solver.env
 /qoder-trial/qoder_creds_10k.json
 /qoder-trial/runtime-info-linux-x64
 /qoder-trial/hooks/spoof_hw.so
+
+# Sensitive files — never commit
+/.qoder/
+/qoder.json
+/x-farm.zip
+/tmp/
+docs/superpowers/plans/2026-08-04-pateway-farm-wiring.md
