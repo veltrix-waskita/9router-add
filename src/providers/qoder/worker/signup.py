@@ -30,10 +30,6 @@ from curl_cffi import requests as creq
 
 BASE = "https://qoder.com"
 CLAIM_API_BASE = os.getenv("QODER_CLAIM_API_BASE", "https://openapi.qoder.sh")
-ACTIVITY_PRO_TRIAL = "pro_trial_300"
-ACTIVITY_ULTIMATE = "ultimate_200_free_invoke"
-ACTIVITY_QWEN800 = "qwen38_800_invoke"
-ACTIVITY_QWEN2000 = "qwen38_2000_invoke"
 TMD_IN_URL = "_____tmd_____"
 TYPES_REDUCED = set()  # reserved
 
@@ -373,13 +369,113 @@ def create_pat(s: Any, name: str = "default") -> str | None:
     return None
 
 
-def exchange_job_token(pat: str, proxy: str | None = None) -> str | None:
-    """POST /api/v1/jobToken/exchange — exchange PAT for a short-lived job token.
+def get_status(auth_headers: dict[str, str], proxy: str | None = None) -> dict[str, Any]:
+    """GET /api/v3/user/status — return plan/email/quota from user profile."""
+    try:
+        h = {**auth_headers, "Accept": "application/json"}
+        kw: dict[str, Any] = {"headers": h, "impersonate": "chrome131", "timeout": 20}
+        if proxy:
+            kw["proxy"] = proxy
+        r = creq.get(f"{CLAIM_API_BASE}/api/v3/user/status", **kw)
+        if r.status_code < 400:
+            data = r.json()
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
 
-    The openapi.qoder.sh endpoint requires Cosy-* machine headers. We send the
-    PAT as `personal_token` and get back `token` (a JWT Bearer for subsequent
-    activity-claim calls). Never logs the PAT or returned token.
+
+def claim_activity_with_eligibility(
+    auth_headers: dict[str, str], activity_id: str, proxy: str | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """Claim single activity by first checking eligibility list, then attempt.
+
+    Returns (claimed=True/False, response_dict). Follows dual_claim.py pattern:
+      1. GET /api/v2/activity/claim/eligibility → list [{activityId, canClaim}]
+      2. Try POST for matching ID where canClaim=True
+      3. If no match but ID provided, try anyway (some accounts auto-grant)
     """
+    result: dict[str, Any] = {"claimed": False, "error": None}
+    try:
+        elig_resp = creq.get(
+            f"{CLAIM_API_BASE}/api/v2/activity/claim/eligibility",
+            headers={**auth_headers, "Accept": "application/json"},
+            impersonate="chrome131",
+            timeout=20,
+        )
+        activities = []
+        if elig_resp.status_code < 400:
+            try:
+                elig_data = elig_resp.json()
+                if isinstance(elig_data, dict):
+                    activities = elig_data.get("data", []) or []
+            except Exception:
+                pass
+
+        # Try claiming via eligibility list first
+        for act in activities:
+            if act.get("activityId") == activity_id and act.get("canClaim"):
+                claim_resp = creq.post(
+                    f"{CLAIM_API_BASE}/api/v2/activity/claim?activityId={activity_id}",
+                    headers={**auth_headers, "Accept": "application/json"},
+                    impersonate="chrome131",
+                    timeout=20,
+                )
+                if claim_resp.status_code < 400:
+                    try:
+                        claim_data = claim_resp.json()
+                        if claim_data.get("code") == 0:
+                            result["claimed"] = True
+                            result["response"] = claim_data
+                        else:
+                            result["error"] = claim_data
+                        return result["claimed"], result
+                    except Exception:
+                        pass
+
+        # Fallback: try direct POST even if not in eligibility list
+        claim_resp = creq.post(
+            f"{CLAIM_API_BASE}/api/v2/activity/claim?activityId={activity_id}",
+            headers={**auth_headers, "Accept": "application/json"},
+            impersonate="chrome131",
+            timeout=20,
+        )
+        if claim_resp.status_code < 400:
+            try:
+                claim_data = claim_resp.json()
+                if claim_data.get("code") == 0:
+                    result["claimed"] = True
+                    result["response"] = claim_data
+                else:
+                    result["error"] = claim_data
+            except Exception:
+                pass
+    except Exception as e:
+        result["error"] = str(e)
+    return result["claimed"], result
+
+
+def check_pro_trial(auth_headers: dict[str, str], proxy: str | None = None) -> dict[str, Any]:
+    """Check if Pro Trial is active by reading user status/plan.
+
+    Returns: {'is_pro': bool, 'plan': str, 'email': str, 'quota': int}
+    """
+    status = get_status(auth_headers, proxy=proxy)
+    if status:
+        plan = status.get("plan", "")
+        is_pro = "PRO_TRIAL" in plan.upper() or "PRO" in plan.upper()
+        return {
+            "is_pro": is_pro,
+            "plan": plan,
+            "email": status.get("email", ""),
+            "quota": status.get("quota", 0),
+        }
+    return {"is_pro": False, "error": "Could not get status"}
+
+
+def exchange_job_token(pat: str, proxy: str | None = None) -> str | None:
+    """POST /api/v1/jobToken/exchange — exchange PAT for a short-lived job token."""
     try:
         h = {
             "Content-Type": "application/json",
@@ -402,35 +498,17 @@ def exchange_job_token(pat: str, proxy: str | None = None) -> str | None:
     return None
 
 
-def claim_activity(auth_headers: dict[str, str], activity_id: str, proxy: str | None = None) -> bool:
-    """POST /api/v2/activity/claim?activityId=... — claim a single activity.
-
-    Returns True if the claim succeeded (200 + code==0), False otherwise.
-    Non-fatal by design; one activity failure does not block the others.
-    """
-    try:
-        h = {**auth_headers, "Accept": "application/json"}
-        kw: dict[str, Any] = {"headers": h, "impersonate": "chrome131", "timeout": 20}
-        if proxy:
-            kw["proxy"] = proxy
-        r = creq.post(f"{CLAIM_API_BASE}/api/v2/activity/claim?activityId={activity_id}", **kw)
-        if r.status_code < 400:
-            try:
-                data = r.json()
-                if data.get("code") == 0:
-                    return True
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return False
-
-
 def claim_post_pat(pat: str, proxy: str | None = None) -> dict:
-    """Exchange PAT → job-token → claim Pro Trial (300 credits) + Ultimate (200) + Qwen (800).
+    """Exchange PAT → job-token → check eligibility → claim activities.
 
-    Best-effort: failures are non-blocking. Returns a summary dict suitable
-    for merging into the final emit_result payload. Never logs the PAT.
+    Mirrors dual_claim.py flow:
+      1. Exchange PAT for job token
+      2. Check Pro Trial via user status API (PLAN_TIER_PRO_TRIAL)
+      3. Claim Ultimate 200 if eligible
+      4. Claim Qwen3.8-Max 800/2000 if eligible
+      5. Return summary (best-effort: failures don't block signup)
+
+    Never logs the PAT or tokens.
     """
     result: dict[str, Any] = {"trial": False, "ultimate": False, "qwen800": False, "qwen2000": False, "credits": 0}
 
@@ -442,38 +520,45 @@ def claim_post_pat(pat: str, proxy: str | None = None) -> dict:
 
     auth_headers = {"Authorization": f"Bearer {job_token}"}
 
-    # 1. Pro Trial (300 credits) — the primary goal.
-    if claim_activity(auth_headers, ACTIVITY_PRO_TRIAL, proxy=proxy):
+    # ===== STEP 1: Check Pro Trial via STATUS API (NOT hardcoded activity ID) =====
+    # Dual claim.py pattern: read user plan first
+    pro_result = check_pro_trial(auth_headers, proxy=proxy)
+    is_trial_active = pro_result.get("is_pro", False)
+
+    if is_trial_active:
         result["trial"] = True
         result["credits"] += 300
-        emit_step("claim_pro_trial", "ok", credits=300)
+        emit_step("claim_pro_trial", "ok", credits=300, plan=pro_result.get("plan", ""))
     else:
-        emit_step("claim_pro_trial", "skipped", reason="not-eligible-or-already-claimed")
+        emit_step("claim_pro_trial", "skipped", reason=f"plan={pro_result.get('plan','?')}")
 
-    # 2. Ultimate 200 free calls.
-    if claim_activity(auth_headers, ACTIVITY_ULTIMATE, proxy=proxy):
+    # ===== STEP 2: Try Ultimate 200 claims (dynamic eligibility list) =====
+    claimed_ult, ult_resp = claim_activity_with_eligibility(auth_headers, "ultimate_200_free_invoke", proxy=proxy)
+    if claimed_ult:
         result["ultimate"] = True
         result["credits"] += 200
         emit_step("claim_ultimate", "ok", credits=200)
     else:
-        emit_step("claim_ultimate", "skipped")
+        emit_step("claim_ultimate", "skipped", error=ult_resp.get("error", "unknown"))
 
-    # 3. Qwen3.8-Max 800 + 2000 free calls.
-    if claim_activity(auth_headers, ACTIVITY_QWEN800, proxy=proxy):
+    # ===== STEP 3: Try Qwen3.8-Max 800 & 2000 =====
+    claimed_800, qwen800_resp = claim_activity_with_eligibility(auth_headers, "qwen38_800_invoke", proxy=proxy)
+    if claimed_800:
         result["qwen800"] = True
         result["credits"] += 800
         emit_step("claim_qwen800", "ok", credits=800)
     else:
-        emit_step("claim_qwen800", "skipped")
+        emit_step("claim_qwen800", "skipped", error=qwen800_resp.get("error", "unknown"))
 
-    if claim_activity(auth_headers, ACTIVITY_QWEN2000, proxy=proxy):
+    claimed_2000, qwen2000_resp = claim_activity_with_eligibility(auth_headers, "qwen38_2000_invoke", proxy=proxy)
+    if claimed_2000:
         result["qwen2000"] = True
         result["credits"] += 2000
         emit_step("claim_qwen2000", "ok", credits=2000)
     else:
-        emit_step("claim_qwen2000", "skipped")
+        emit_step("claim_qwen2000", "skipped", error=qwen2000_resp.get("error", "unknown"))
 
-    emit_step("claim_post_pat", "ok", **{k: v for k, v in result.items()})
+    emit_step("claim_post_pat", "ok", **result)
     return result
 
 
