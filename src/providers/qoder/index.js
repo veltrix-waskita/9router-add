@@ -298,19 +298,11 @@ class QoderProvider extends BaseProvider {
       console.warn(`[qoder] could not append trial JSONL file ${trialJsonlFile}: ${err.message}`);
     }
 
-    // File 3b: Array JSON for backward compatibility with old format
+    // File 3b: JSONL format (one JSON object per line) — consistent with JSONL log
     const trialJsonFile = path.join(dir, "qoder-pat-trial.json");
     try {
-      let existing = [];
-      if (fs.existsSync(trialJsonFile)) {
-        try {
-          existing = JSON.parse(fs.readFileSync(trialJsonFile, "utf8"));
-        } catch {
-          existing = [];
-        }
-      }
-      existing.push({ email, pat, claims, timestamp: new Date().toISOString() });
-      fs.writeFileSync(trialJsonFile, JSON.stringify(existing, null, 2) + "\n", { mode: 0o600 });
+      const entry = { email, pat, claims, timestamp: new Date().toISOString() };
+      fs.appendFileSync(trialJsonFile, JSON.stringify(entry) + "\n", { mode: 0o600 });
     } catch (err) {
       console.warn(`[qoder] could not append trial JSON file ${trialJsonFile}: ${err.message}`);
     }

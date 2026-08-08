@@ -21,5 +21,6 @@ captcha-solver/solver.env
 # Qoder sidecar outputs — contain live PATs (0600, appended per success).
 /qoder-pats.txt
 /qoder-accounts.txt
-# PAT-only files with trial claim status (contains real PATs)
+# Trial filtering files — contains PRO_TRIAL accounts with full details (0600)
+/qoder-trial-log.jsonl
 /qoder-pat-trial.json

@@ -570,28 +570,37 @@ def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict
     Best-effort background work — NEVER blocks signup. Returns (success, result_dict).
     
     Expects:
-      - /home/elzanom/work/tools/qoder_trial/dual_claim.py exists
-      - Python venv at src/providers/qoder/worker/.venv
+      - /home/elzanom/work/tools/qoker_trial/dual_claim.py exists
+      - Python venv at src/providers/qoker/worker/.venv
     
     Output parsing looks for "Pro Trial:" + "ACTIVE" status.
     """
+    import sys
+    
+    # Determine worker dir (where signup.py is located)
+    worker_dir = os.path.dirname(os.path.abspath(__file__))
+    
     dual_claim_py = "/home/elzanom/work/tools/qoder_trial/dual_claim.py"
-    venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python3")
+    venv_python = os.path.join(worker_dir, ".venv", "bin", "python3")
+    
+    emit_step("background_claim", "starting")
     
     if not os.path.exists(dual_claim_py):
-        emit_step("background_claim", "skipped", reason="dual_claim.py not found")
+        emit_step("background_claim", "skipped", reason=f"dual_claim.py not found: {dual_claim_py}")
         return False, {"error": "dual_claim.py not found"}
     if not os.path.exists(venv_python):
-        emit_step("background_claim", "skipped", reason="venv not found")
+        emit_step("background_claim", "skipped", reason=f"venv python not found: {venv_python}")
         return False, {"error": "venv not found"}
     
-    cmd = [venv_python, dual_claim_py, "--pat", pat, "--pool"]
+    subprocess_cmd = [venv_python, dual_claim_py, "--pat", pat, "--pool"]
     try:
+        emit_step("background_claim", "spawning")
         r = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=300,
+            subprocess_cmd, capture_output=True, text=True, timeout=300,
             cwd="/home/elzanom/work/tools/qoder_trial",
         )
-        stdout = (r.stdout or "") + (r.stderr or "")
+        
+        stdout = (r.stdout or "") + "\n" + (r.stderr or "")
         success = r.returncode == 0
         
         # Parse trial status from output
@@ -606,13 +615,14 @@ def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict
             "credits": credits,
             "success": success,
         }
-        emit_step("background_claim", "ok" if trial_active else "skipped", **result)
+        
+        emit_step("background_claim", "ok" if trial_active else "failed", **result)
         return trial_active, result
     except subprocess.TimeoutExpired:
         emit_step("background_claim", "failed", reason="TIMEOUT 300s")
         return False, {"error": "TIMEOUT 300s"}
     except Exception as e:
-        emit_step("background_claim", "failed", error=str(e)[:80])
+        emit_step("background_claim", "failed", error=str(e)[:100])
         return False, {"error": str(e)}
 
 
@@ -716,8 +726,10 @@ def run() -> int:
             "pat": pat,
             "me": bool(me),
         }
-        result_kwargs.update({k: v for k, v in claim_result.items() 
-                            if k in ("trial", "ultimate", "qwen800", "credits")})
+        # Filter to ONLY safe fields for final emit (no debug data)
+        safe_fields = {k: v for k, v in claim_result.items() 
+                      if k in ("trial", "ultimate", "qwen800", "qwen2000", "credits")}
+        result_kwargs.update(safe_fields)
         
         emit_result(True, **result_kwargs)
         return 0
