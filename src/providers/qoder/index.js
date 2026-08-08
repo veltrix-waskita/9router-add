@@ -283,12 +283,36 @@ class QoderProvider extends BaseProvider {
       credits: Number(result.credits ?? 0),
     };
 
-    const trialFile = path.join(dir, "qoder-pat-trial.json");
+    // File 3a: JSONL log for programmatic access
+    const trialJsonlFile = path.join(dir, "qoder-trial-log.jsonl");
     try {
-      const entry = { email, pat, claims, timestamp: new Date().toISOString() };
-      fs.appendFileSync(trialFile, JSON.stringify(entry) + "\n", { mode: 0o600 });
+      const entry = {
+        email,
+        pat,
+        claims,
+        timestamp: new Date().toISOString(),
+        source: "qoder-provider-auto",
+      };
+      fs.appendFileSync(trialJsonlFile, JSON.stringify(entry) + "\n", { mode: 0o600 });
     } catch (err) {
-      console.warn(`[qoder] could not append trial file ${trialFile}: ${err.message}`);
+      console.warn(`[qoder] could not append trial JSONL file ${trialJsonlFile}: ${err.message}`);
+    }
+
+    // File 3b: Array JSON for backward compatibility with old format
+    const trialJsonFile = path.join(dir, "qoder-pat-trial.json");
+    try {
+      let existing = [];
+      if (fs.existsSync(trialJsonFile)) {
+        try {
+          existing = JSON.parse(fs.readFileSync(trialJsonFile, "utf8"));
+        } catch {
+          existing = [];
+        }
+      }
+      existing.push({ email, pat, claims, timestamp: new Date().toISOString() });
+      fs.writeFileSync(trialJsonFile, JSON.stringify(existing, null, 2) + "\n", { mode: 0o600 });
+    } catch (err) {
+      console.warn(`[qoder] could not append trial JSON file ${trialJsonFile}: ${err.message}`);
     }
   }
 

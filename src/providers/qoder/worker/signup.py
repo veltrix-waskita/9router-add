@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sys
+import subprocess
 from typing import Any
 
 from curl_cffi import requests as creq
@@ -562,6 +563,59 @@ def claim_post_pat(pat: str, proxy: str | None = None) -> dict:
     return result
 
 
+
+def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict]:
+    """Run dual_claim.py as subprocess to claim Pro Trial 300 credits.
+
+    Best-effort background work — NEVER blocks signup. Returns (success, result_dict).
+    
+    Expects:
+      - /home/elzanom/work/tools/qoder_trial/dual_claim.py exists
+      - Python venv at src/providers/qoder/worker/.venv
+    
+    Output parsing looks for "Pro Trial:" + "ACTIVE" status.
+    """
+    dual_claim_py = "/home/elzanom/work/tools/qoder_trial/dual_claim.py"
+    venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python3")
+    
+    if not os.path.exists(dual_claim_py):
+        emit_step("background_claim", "skipped", reason="dual_claim.py not found")
+        return False, {"error": "dual_claim.py not found"}
+    if not os.path.exists(venv_python):
+        emit_step("background_claim", "skipped", reason="venv not found")
+        return False, {"error": "venv not found"}
+    
+    cmd = [venv_python, dual_claim_py, "--pat", pat, "--pool"]
+    try:
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300,
+            cwd="/home/elzanom/work/tools/qoder_trial",
+        )
+        stdout = (r.stdout or "") + (r.stderr or "")
+        success = r.returncode == 0
+        
+        # Parse trial status from output
+        trial_active = "Pro Trial:" in stdout and "ACTIVE" in stdout.split("Pro Trial:")[1][:60]
+        credits_match = re.search(r"Credits:\s*([\d.]+)", stdout)
+        credits = int(float(credits_match.group(1))) if credits_match else 0
+        
+        result = {
+            "trial": trial_active,
+            "ultimate": "ULTIMATE] CLAIMED" in stdout,
+            "qwen800": "QWEN3.8 800" in stdout and "CLAIMED" in stdout,
+            "credits": credits,
+            "success": success,
+        }
+        emit_step("background_claim", "ok" if trial_active else "skipped", **result)
+        return trial_active, result
+    except subprocess.TimeoutExpired:
+        emit_step("background_claim", "failed", reason="TIMEOUT 300s")
+        return False, {"error": "TIMEOUT 300s"}
+    except Exception as e:
+        emit_step("background_claim", "failed", error=str(e)[:80])
+        return False, {"error": str(e)}
+
+
 # ---- run -------------------------------------------------------------------
 
 
@@ -651,17 +705,21 @@ def run() -> int:
             return 1
         me = login_me(s)
 
-        # Best-effort claims after PAT creation — failures do not block signup.
-        claim_result = claim_post_pat(pat, proxy=proxy)
+        # ===== STEP: Best-effort background claim to Pro Trial 300 credits =====
+        # Spawn dual_claim.py subprocess — NEVER blocks signup on failure
+        trial_active, claim_result = run_background_claim(pat, proxy=proxy)
 
-        emit_result(
-            True,
-            email=email,
-            name=name,
-            pat=pat,
-            me=bool(me),
-            **claim_result,
-        )
+        # Merge claim result into final payload so afterAdd() can filter trial accounts
+        result_kwargs = {
+            "email": email,
+            "name": name,
+            "pat": pat,
+            "me": bool(me),
+        }
+        result_kwargs.update({k: v for k, v in claim_result.items() 
+                            if k in ("trial", "ultimate", "qwen800", "credits")})
+        
+        emit_result(True, **result_kwargs)
         return 0
     finally:
         try:
