@@ -24,3 +24,8 @@ captcha-solver/solver.env
 # Trial filtering files — contains PRO_TRIAL accounts with full details (0600)
 /qoder-trial-log.jsonl
 /qoder-pat-trial.json
+
+# Qoder trial claim tool (vendored — contains encrypted blob + machine creds pool)
+/qoder-trial/qoder_creds_10k.json
+/qoder-trial/runtime-info-linux-x64
+/qoder-trial/hooks/spoof_hw.so

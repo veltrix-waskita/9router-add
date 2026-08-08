@@ -576,11 +576,15 @@ def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict
     Output parsing looks for "Pro Trial:" + "ACTIVE" status.
     """
     import sys
-    
+
     # Determine worker dir (where signup.py is located)
     worker_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    dual_claim_py = "/home/elzanom/work/tools/qoder_trial/dual_claim.py"
+    # qoder-trial/ lives at repo root, 4 levels up from worker/signup.py
+    # (worker → qoder → providers → src → repo_root)
+    repo_root = os.path.abspath(os.path.join(worker_dir, "..", "..", "..", ".."))
+    trial_dir = os.path.join(repo_root, "qoder-trial")
+
+    dual_claim_py = os.path.join(trial_dir, "dual_claim.py")
     venv_python = os.path.join(worker_dir, ".venv", "bin", "python3")
     
     emit_step("background_claim", "starting")
@@ -593,11 +597,17 @@ def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict
         return False, {"error": "venv not found"}
     
     subprocess_cmd = [venv_python, dual_claim_py, "--pat", pat, "--pool"]
+    # Set env vars so dual_claim.py finds vendored assets inside qoder-trial/
+    # (runtime-info binary, spoof_hw.so hook, generate_identity.py)
+    env = os.environ.copy()
+    env["QODER_IDENTITY_DIR"] = trial_dir
+    env["QODER_RUNTIME_INFO"] = os.path.join(trial_dir, "runtime-info-linux-x64")
+    env["QODER_SPOOF_SO"] = os.path.join(trial_dir, "hooks", "spoof_hw.so")
     try:
         emit_step("background_claim", "spawning")
         r = subprocess.run(
             subprocess_cmd, capture_output=True, text=True, timeout=300,
-            cwd="/home/elzanom/work/tools/qoder_trial",
+            cwd=trial_dir, env=env,
         )
         
         stdout = (r.stdout or "") + "\n" + (r.stderr or "")
