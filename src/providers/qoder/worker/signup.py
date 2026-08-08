@@ -115,12 +115,12 @@ def solve_captcha(scene_id: str = QODER_ALIYUN_SCENE, prefix: str = QODER_ALIYUN
         )
         d = r.json()
         if not d.get("solved") or d.get("verify_code") != "T001":
-            emit({"event": "debug", "msg": "captcha-solve-fail", "error": str(d.get("error", ""))[:80]})
+            emit_step("captcha_solve_fail", "warn", error=str(d.get("error", ""))[:80])
             return None
         tok = d["token"]
         st = d.get("security_token") or ""
         if not st:
-            emit({"event": "debug", "msg": "captcha-no-security-token"})
+            emit_step("captcha_no_security_token", "warn")
             return None
         payload = {
             "certifyId": tok.get("certifyId", ""),
@@ -130,7 +130,7 @@ def solve_captcha(scene_id: str = QODER_ALIYUN_SCENE, prefix: str = QODER_ALIYUN
         }
         return base64.b64encode(json.dumps(payload).encode()).decode()
     except Exception as e:
-        emit({"event": "debug", "msg": "captcha-solve-error", "error": str(e)[:80]})
+        emit_step("captcha_solve_error", "warn", error=str(e)[:80])
         return None
 
 
@@ -596,44 +596,62 @@ def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict
         emit_step("background_claim", "skipped", reason=f"venv python not found: {venv_python}")
         return False, {"error": "venv not found"}
     
-    subprocess_cmd = [venv_python, dual_claim_py, "--pat", pat, "--pool"]
+    subprocess_cmd = [venv_python, dual_claim_py, "--pat", pat, "--generate"]
     # Set env vars so dual_claim.py finds vendored assets inside qoder-trial/
     # (runtime-info binary, spoof_hw.so hook, generate_identity.py)
     env = os.environ.copy()
     env["QODER_IDENTITY_DIR"] = trial_dir
     env["QODER_RUNTIME_INFO"] = os.path.join(trial_dir, "runtime-info-linux-x64")
     env["QODER_SPOOF_SO"] = os.path.join(trial_dir, "hooks", "spoof_hw.so")
-    try:
-        emit_step("background_claim", "spawning")
-        r = subprocess.run(
-            subprocess_cmd, capture_output=True, text=True, timeout=300,
-            cwd=trial_dir, env=env,
-        )
-        
-        stdout = (r.stdout or "") + "\n" + (r.stderr or "")
-        success = r.returncode == 0
-        
-        # Parse trial status from output
-        trial_active = "Pro Trial:" in stdout and "ACTIVE" in stdout.split("Pro Trial:")[1][:60]
-        credits_match = re.search(r"Credits:\s*([\d.]+)", stdout)
-        credits = int(float(credits_match.group(1))) if credits_match else 0
-        
-        result = {
-            "trial": trial_active,
-            "ultimate": "ULTIMATE] CLAIMED" in stdout,
-            "qwen800": "QWEN3.8 800" in stdout and "CLAIMED" in stdout,
-            "credits": credits,
-            "success": success,
-        }
-        
-        emit_step("background_claim", "ok" if trial_active else "failed", **result)
-        return trial_active, result
-    except subprocess.TimeoutExpired:
-        emit_step("background_claim", "failed", reason="TIMEOUT 300s")
-        return False, {"error": "TIMEOUT 300s"}
-    except Exception as e:
-        emit_step("background_claim", "failed", error=str(e)[:100])
-        return False, {"error": str(e)}
+
+    # Trial claim needs MULTIPLE attempts with ~30s cooldown between them
+    # (qoder.com anti-fraud: fresh account usually shows PLAN_TIER_FREE for a
+    # while before the trial grant becomes claimable). Loop until active.
+    MAX_ATTEMPTS = int(os.getenv("QODER_CLAIM_MAX_ATTEMPTS", "5"))
+    COOLDOWN_S = int(os.getenv("QODER_CLAIM_COOLDOWN_S", "30"))
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            emit_step("background_claim", "spawning", attempt=attempt, max=MAX_ATTEMPTS)
+            r = subprocess.run(
+                subprocess_cmd, capture_output=True, text=True, timeout=300,
+                cwd=trial_dir, env=env,
+            )
+
+            stdout = (r.stdout or "") + "\n" + (r.stderr or "")
+            success = r.returncode == 0
+
+            # Parse trial status from output
+            trial_active = "Pro Trial:" in stdout and "ACTIVE" in stdout.split("Pro Trial:")[1][:60]
+            credits_match = re.search(r"Credits:\s*([\d.]+)", stdout)
+            credits = int(float(credits_match.group(1))) if credits_match else 0
+
+            result = {
+                "trial": trial_active,
+                "ultimate": "ULTIMATE] CLAIMED" in stdout,
+                "qwen800": "QWEN3.8 800" in stdout and "CLAIMED" in stdout,
+                "credits": credits,
+                "success": success,
+                "attempt": attempt,
+            }
+
+            emit_step("background_claim", "ok" if trial_active else "failed", **result)
+            if trial_active:
+                return True, result
+
+            # Cooldown before next attempt (unless last)
+            if attempt < MAX_ATTEMPTS:
+                emit_step("background_claim", "cooldown", wait_s=COOLDOWN_S, attempt=attempt)
+                time.sleep(COOLDOWN_S)
+        except subprocess.TimeoutExpired:
+            emit_step("background_claim", "failed", reason=f"TIMEOUT 300s (attempt {attempt})")
+            return False, {"error": "TIMEOUT 300s"}
+        except Exception as e:
+            emit_step("background_claim", "failed", error=str(e)[:100], attempt=attempt)
+            return False, {"error": str(e)}
+
+    emit_step("background_claim", "failed", reason=f"trial-not-claimed-after-{MAX_ATTEMPTS}")
+    return False, {"error": f"trial-not-claimed-after-{MAX_ATTEMPTS}"}
 
 
 # ---- run -------------------------------------------------------------------
