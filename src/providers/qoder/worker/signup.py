@@ -29,6 +29,11 @@ from typing import Any
 from curl_cffi import requests as creq
 
 BASE = "https://qoder.com"
+CLAIM_API_BASE = os.getenv("QODER_CLAIM_API_BASE", "https://openapi.qoder.sh")
+ACTIVITY_PRO_TRIAL = "pro_trial_300"
+ACTIVITY_ULTIMATE = "ultimate_200_free_invoke"
+ACTIVITY_QWEN800 = "qwen38_800_invoke"
+ACTIVITY_QWEN2000 = "qwen38_2000_invoke"
 TMD_IN_URL = "_____tmd_____"
 TYPES_REDUCED = set()  # reserved
 
@@ -50,6 +55,11 @@ def emit_step(step: str, status: str = "ok", **kv: Any) -> None:
 
 
 def emit_result(ok: bool, **kv: Any) -> None:
+    # Success payload always carries PAT as `pat`. New fields (best-effort claims):
+    #   trial: True if Pro Trial 300 credits claimed
+    #   ultimate: True if Ultimate 200 free calls claimed
+    #   qwen800 / qwen2000: Qwen3.8-Max claim status
+    #   credits: sum(300,200,800,2000) of successful activities
     print(json.dumps({"kind": "result", "ok": bool(ok), **kv}), flush=True)
 
 
@@ -363,6 +373,110 @@ def create_pat(s: Any, name: str = "default") -> str | None:
     return None
 
 
+def exchange_job_token(pat: str, proxy: str | None = None) -> str | None:
+    """POST /api/v1/jobToken/exchange — exchange PAT for a short-lived job token.
+
+    The openapi.qoder.sh endpoint requires Cosy-* machine headers. We send the
+    PAT as `personal_token` and get back `token` (a JWT Bearer for subsequent
+    activity-claim calls). Never logs the PAT or returned token.
+    """
+    try:
+        h = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        kw: dict[str, Any] = {"json": {"personal_token": pat}, "headers": h, "impersonate": "chrome131", "timeout": 20}
+        if proxy:
+            kw["proxy"] = proxy
+        r = creq.post(f"{CLAIM_API_BASE}/api/v1/jobToken/exchange", **kw)
+        if r.status_code < 400:
+            try:
+                data = r.json()
+                tok = data.get("token") or data.get("data", {}).get("token")
+                if tok:
+                    return str(tok)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def claim_activity(auth_headers: dict[str, str], activity_id: str, proxy: str | None = None) -> bool:
+    """POST /api/v2/activity/claim?activityId=... — claim a single activity.
+
+    Returns True if the claim succeeded (200 + code==0), False otherwise.
+    Non-fatal by design; one activity failure does not block the others.
+    """
+    try:
+        h = {**auth_headers, "Accept": "application/json"}
+        kw: dict[str, Any] = {"headers": h, "impersonate": "chrome131", "timeout": 20}
+        if proxy:
+            kw["proxy"] = proxy
+        r = creq.post(f"{CLAIM_API_BASE}/api/v2/activity/claim?activityId={activity_id}", **kw)
+        if r.status_code < 400:
+            try:
+                data = r.json()
+                if data.get("code") == 0:
+                    return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
+def claim_post_pat(pat: str, proxy: str | None = None) -> dict:
+    """Exchange PAT → job-token → claim Pro Trial (300 credits) + Ultimate (200) + Qwen (800).
+
+    Best-effort: failures are non-blocking. Returns a summary dict suitable
+    for merging into the final emit_result payload. Never logs the PAT.
+    """
+    result: dict[str, Any] = {"trial": False, "ultimate": False, "qwen800": False, "qwen2000": False, "credits": 0}
+
+    emit_step("claim_post_pat", "pending")
+    job_token = exchange_job_token(pat, proxy=proxy)
+    if not job_token:
+        emit_step("claim_post_pat", "skipped", reason="job-token-exchange-failed")
+        return result
+
+    auth_headers = {"Authorization": f"Bearer {job_token}"}
+
+    # 1. Pro Trial (300 credits) — the primary goal.
+    if claim_activity(auth_headers, ACTIVITY_PRO_TRIAL, proxy=proxy):
+        result["trial"] = True
+        result["credits"] += 300
+        emit_step("claim_pro_trial", "ok", credits=300)
+    else:
+        emit_step("claim_pro_trial", "skipped", reason="not-eligible-or-already-claimed")
+
+    # 2. Ultimate 200 free calls.
+    if claim_activity(auth_headers, ACTIVITY_ULTIMATE, proxy=proxy):
+        result["ultimate"] = True
+        result["credits"] += 200
+        emit_step("claim_ultimate", "ok", credits=200)
+    else:
+        emit_step("claim_ultimate", "skipped")
+
+    # 3. Qwen3.8-Max 800 + 2000 free calls.
+    if claim_activity(auth_headers, ACTIVITY_QWEN800, proxy=proxy):
+        result["qwen800"] = True
+        result["credits"] += 800
+        emit_step("claim_qwen800", "ok", credits=800)
+    else:
+        emit_step("claim_qwen800", "skipped")
+
+    if claim_activity(auth_headers, ACTIVITY_QWEN2000, proxy=proxy):
+        result["qwen2000"] = True
+        result["credits"] += 2000
+        emit_step("claim_qwen2000", "ok", credits=2000)
+    else:
+        emit_step("claim_qwen2000", "skipped")
+
+    emit_step("claim_post_pat", "ok", **{k: v for k, v in result.items()})
+    return result
+
+
 # ---- run -------------------------------------------------------------------
 
 
@@ -451,12 +565,17 @@ def run() -> int:
             emit_result(False, error="pat-missing", step="pat")
             return 1
         me = login_me(s)
+
+        # Best-effort claims after PAT creation — failures do not block signup.
+        claim_result = claim_post_pat(pat, proxy=proxy)
+
         emit_result(
             True,
             email=email,
             name=name,
             pat=pat,
             me=bool(me),
+            **claim_result,
         )
         return 0
     finally:

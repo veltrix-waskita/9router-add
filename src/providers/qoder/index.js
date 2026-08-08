@@ -220,34 +220,75 @@ class QoderProvider extends BaseProvider {
           name: result.name || this._accountName,
         },
       },
+      // Copy claim result fields (best-effort, from worker's emit_result) so
+      // afterAdd / callers can read them for sidecar files + trial filtering.
+      trial: result.trial,
+      ultimate: result.ultimate,
+      qwen800: result.qwen800,
+      qwen2000: result.qwen2000,
+      credits: result.credits,
     };
   }
 
   /**
    * Lifecycle: afterAdd — persist PAT-only + full-account sidecar files.
    *
-   * Appends one PAT line to qoder-pats.txt and one account line to
-   * qoder-accounts.txt (both gitignored, 0600) next to the connection
-   * result. Only PAT/email/name — never the password. Non-fatal: a
-   * sidecar write failure must not fail the signup.
+   * Appends to three files (all gitignored, 0600):
+   *   1. qoder-pats.txt           — one-line per PAT (for bulk API use)
+   *   2. qoder-accounts.txt       — email | name | PAT (one per line)
+   *   3. qoder-pat-trial.json     — JSON-lines: {email,pat,claims,timestamp}
+   *                              - ONLY if worker.reported.trial === true (Pro Trial active)
    *
-   * @param {{ok:boolean, connection?:object}} result - add() result.
+   * Never logs passwords. The trial file filters for accounts with Pro Trial.
+   * Non-fatal: failures do not block signup.
+   *
+   * @param {{ok:boolean, connection?:object, trial?:boolean, ultimate?:boolean, qwen800?:boolean, qwen2000?:boolean, credits?:number}} result - add() result.
    */
   async afterAdd(result) {
     if (!result || result.ok !== true || !result.connection) return;
     const { connection } = result;
     const pat = connection.data && connection.data.apiKey;
     if (!pat) return;
+
     const dir = this.config.accountsDir || process.cwd();
-    const patLine = `${pat}\n`;
-    const name = (connection.data && connection.data.name) || "";
-    const accountLine = `${connection.email} | ${name} | ${pat}\n`;
+
+    // 1. Original sidecars (via super)
     try {
-      fs.appendFileSync(path.join(dir, "qoder-pats.txt"), patLine, { mode: 0o600 });
+      await super.afterAdd(result);
+    } catch {
+      /* ignore */
+    }
+
+    // 2. Full-account line (always)
+    try {
+      const name = (connection.data && connection.data.name) || "";
+      const accountLine = `${connection.email} | ${name} | ${pat}\n`;
       fs.appendFileSync(path.join(dir, "qoder-accounts.txt"), accountLine, { mode: 0o600 });
+      // Append to pats-only file too
+      fs.appendFileSync(path.join(dir, "qoder-pats.txt"), `${pat}\n`, { mode: 0o600 });
     } catch (err) {
-      // Sidecar persistence is best-effort; do not fail the signup.
-      console.warn(`[qoder] could not append PAT sidecar files: ${err.message}`);
+      console.warn(`[qoder] could not append account/PAT sidecar files: ${err.message}`);
+    }
+
+    // 3. TRIAL FILE — only if Pro Trial was claimed successfully (trial===true)
+    const isTrialed = (result.trial ?? false) === true;
+    if (!isTrialed) return;
+
+    const email = connection.email || "";
+    const claims = {
+      trial: true,
+      ultimate: Boolean(result.ultimate),
+      qwen800: Boolean(result.qwen800),
+      qwen2000: Boolean(result.qwen2000),
+      credits: Number(result.credits ?? 0),
+    };
+
+    const trialFile = path.join(dir, "qoder-pat-trial.json");
+    try {
+      const entry = { email, pat, claims, timestamp: new Date().toISOString() };
+      fs.appendFileSync(trialFile, JSON.stringify(entry) + "\n", { mode: 0o600 });
+    } catch (err) {
+      console.warn(`[qoder] could not append trial file ${trialFile}: ${err.message}`);
     }
   }
 

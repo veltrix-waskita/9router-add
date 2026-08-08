@@ -188,3 +188,75 @@ test("afterAdd skips sidecar write when result has no PAT", async () => {
   assert.ok(!fs.existsSync(path.join(dir, "qoder-pats.txt")));
   assert.ok(!fs.existsSync(path.join(dir, "qoder-accounts.txt")));
 });
+
+test("add() passes trial claim fields through to the result", async () => {
+  const p = new QoderProvider({ mode: "local" }, {}, {});
+  const SECRET_PAT = "pt-trial-test-d34db33f";
+  p._spawnSignupWorker = async (workerDir, env, { onEvent }) => {
+    onEvent(parseWorkerLine(
+      JSON.stringify({ kind: "result", ok: true, step: "register2", pat: SECRET_PAT, email: "t@b",
+        trial: true, ultimate: false, qwen800: true, qwen2000: false, credits: 1100 })
+    ));
+  };
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...args) => logs.push(args.join(" "));
+  try {
+    const result = await p.add({ email: "t@b.com", password: "pw" }, {});
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.connection.data.apiKey, SECRET_PAT);
+    // Trial fields must survive in the returned result
+    assert.strictEqual(result.trial, true);
+    assert.strictEqual(result.ultimate, false);
+    assert.strictEqual(result.qwen800, true);
+    assert.strictEqual(result.credits, 1100);
+  } finally {
+    console.log = origLog;
+  }
+});
+
+test("afterAdd writes pat-trial.json ONLY when trial===true", async () => {
+  const os = require("os");
+  const path = require("path");
+  const fs = require("fs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qoder-trial-"));
+  const p = new QoderProvider({ mode: "local", accountsDir: dir }, {}, {});
+
+  // Success with trial → should write trial file
+  await p.afterAdd({
+    ok: true,
+    connection: { provider: "qoder", email: "trial@minom.my.id", password: "pw",
+      authType: "apikey", data: { apiKey: "pt-trial-abc", name: "Trial User" } },
+    trial: true,
+    ultimate: false,
+    qwen800: true,
+    credits: 1100,
+  });
+
+  // Success without trial → should NOT write trial file
+  await p.afterAdd({
+    ok: true,
+    connection: { provider: "qoder", email: "notrial@minom.my.id", password: "pw",
+      authType: "apikey", data: { apiKey: "pt-notrial-xyz", name: "No Trial" } },
+    trial: false,
+    credits: 0,
+  });
+
+  // Verify trial file exists with correct content
+  const trialFile = path.join(dir, "qoder-pat-trial.json");
+  assert.ok(fs.existsSync(trialFile));
+  const lines = fs.readFileSync(trialFile, "utf8").split("\n").filter(Boolean);
+  assert.strictEqual(lines.length, 1, "should contain exactly 1 trial line");
+  const entry = JSON.parse(lines[0]);
+  assert.strictEqual(entry.email, "trial@minom.my.id");
+  assert.strictEqual(entry.pat, "pt-trial-abc");
+  assert.strictEqual(entry.claims.trial, true);
+  assert.strictEqual(entry.claims.qwen800, true);
+  assert.strictEqual(entry.claims.credits, 1100);
+  // never the password
+  assert.ok(!JSON.stringify(entry).includes("pw"));
+
+  // Regular sidecars still written
+  assert.ok(fs.existsSync(path.join(dir, "qoder-pats.txt")));
+  assert.ok(fs.existsSync(path.join(dir, "qoder-accounts.txt")));
+});
