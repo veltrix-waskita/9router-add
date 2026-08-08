@@ -597,7 +597,7 @@ def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict
         emit_step("background_claim", "skipped", reason=f"venv python not found: {venv_python}")
         return False, {"error": "venv not found"}
     
-    subprocess_cmd = [venv_python, dual_claim_py, "--pat", pat, "--generate"]
+    subprocess_cmd = [venv_python, dual_claim_py, "--pat", pat, "--pool"]
     # Set env vars so dual_claim.py finds vendored assets inside qoder-trial/
     # (runtime-info binary, spoof_hw.so hook, generate_identity.py)
     env = os.environ.copy()
@@ -605,11 +605,12 @@ def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict
     env["QODER_RUNTIME_INFO"] = os.path.join(trial_dir, "runtime-info-linux-x64")
     env["QODER_SPOOF_SO"] = os.path.join(trial_dir, "hooks", "spoof_hw.so")
 
-    # Trial claim needs MULTIPLE attempts with ~30s cooldown between them
-    # (qoder.com anti-fraud: fresh account usually shows PLAN_TIER_FREE for a
-    # while before the trial grant becomes claimable). Loop until active.
-    MAX_ATTEMPTS = int(os.getenv("QODER_CLAIM_MAX_ATTEMPTS", "10"))
-    COOLDOWN_S = int(os.getenv("QODER_CLAIM_COOLDOWN_S", "60"))
+    # Dynamic claim: run dual_claim repeatedly with the POOL. No forced
+    # cooldown — each dual_claim invocation tries fresh pool creds. The
+    # internal "Waiting 30 seconds for Pro Trial to activate..." in the
+    # output means the trial grant was ACCEPTED (dual_claim waits 30s before
+    # claiming Qwen). That 30s gap is the success signal.
+    MAX_ATTEMPTS = int(os.getenv("QODER_CLAIM_MAX_ATTEMPTS", "15"))
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -622,13 +623,18 @@ def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict
             stdout = (r.stdout or "") + "\n" + (r.stderr or "")
             success = r.returncode == 0
 
-            # Parse trial status from output
+            # SUCCESS SIGNAL: dual_claim's own 30s wait (trial grant accepted)
+            # or explicit ACTIVE status. No artificial cooldown needed — the
+            # 30s wait inside dual_claim IS the marker.
+            waiting_30s = "Waiting 30 seconds" in stdout
             trial_active = "Pro Trial:" in stdout and "ACTIVE" in stdout.split("Pro Trial:")[1][:60]
+            claimed = waiting_30s or trial_active
+
             credits_match = re.search(r"Credits:\s*([\d.]+)", stdout)
             credits = int(float(credits_match.group(1))) if credits_match else 0
 
             result = {
-                "trial": trial_active,
+                "trial": claimed,
                 "ultimate": "ULTIMATE] CLAIMED" in stdout,
                 "qwen800": "QWEN3.8 800" in stdout and "CLAIMED" in stdout,
                 "credits": credits,
@@ -636,14 +642,11 @@ def run_background_claim(pat: str, proxy: str | None = None) -> tuple[bool, dict
                 "attempt": attempt,
             }
 
-            emit_step("background_claim", "ok" if trial_active else "failed", **result)
-            if trial_active:
+            emit_step("background_claim", "ok" if claimed else "failed", **result)
+            if claimed:
                 return True, result
 
-            # Cooldown before next attempt (unless last)
-            if attempt < MAX_ATTEMPTS:
-                emit_step("background_claim", "cooldown", wait_s=COOLDOWN_S, attempt=attempt)
-                time.sleep(COOLDOWN_S)
+            # No artificial sleep — next attempt immediately (pool rotates creds).
         except subprocess.TimeoutExpired:
             emit_step("background_claim", "failed", reason=f"TIMEOUT 300s (attempt {attempt})")
             return False, {"error": "TIMEOUT 300s"}
