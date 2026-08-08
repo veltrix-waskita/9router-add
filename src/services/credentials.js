@@ -89,6 +89,7 @@ function generateAccounts({
   aliasFile,
   saveFile,
   proxy,
+  emailSource,
 } = {}) {
   const domain = resolveAliasDomain(config, providerName);
   if (!domain) {
@@ -123,6 +124,9 @@ function generateAccounts({
     };
     const options = {};
     if (proxy) options.proxy = proxy;
+    // Critical: preserve emailSource (imap/tempmail) — without it the provider
+    // falls back to its default (tempmail), ignoring the user's IMAP choice.
+    if (emailSource) options.emailSource = emailSource;
     return { credentials, options };
   });
 

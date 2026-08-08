@@ -878,6 +878,7 @@ async function promptAutoAccounts(rl, config, providerName) {
       providerName,
       count,
       saveFile,
+      emailSource, // imap — preserve user's choice per account
     });
     accounts = result.accounts;
     aliasPath = result.aliasPath;
