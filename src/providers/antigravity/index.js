@@ -74,6 +74,9 @@ class AntigravityProvider extends BaseProvider {
    * @returns {string} The callback URL.
    */
   _buildCallbackUrl() {
+    // Provider-specific override wins (config.providers.antigravity.oauthCallbackUrl).
+    const provCfg = this.config.providerConfig || {};
+    if (provCfg.oauthCallbackUrl) return provCfg.oauthCallbackUrl;
     if (this.config.oauthCallbackUrl) return this.config.oauthCallbackUrl;
     const proto = this.config.proto || "http";
     const host = this.config.host || "localhost";

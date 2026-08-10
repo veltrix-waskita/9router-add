@@ -89,6 +89,62 @@ function getProxyForAccount(proxies, accountIndex) {
   return proxies[((accountIndex % proxies.length) + proxies.length) % proxies.length];
 }
 
+// Pick the first LIVE proxy from the pool, else null (caller falls back to a
+// DIRECT connection). Liveness is checked with a fast HEAD request. A dead
+// proxy (all network errors / auth 407) would break the initial navigation
+// (e.g. Google OAuth) — better to go direct than hang on a dead tunnel.
+/** @param {Array<object>} proxies @returns {Promise<object|null>} */
+async function pickLiveOrFirst(proxies) {
+  if (!Array.isArray(proxies) || proxies.length === 0) return null;
+  const checked = Math.min(proxies.length, 10); // don't scan all 100
+  for (let i = 0; i < checked; i++) {
+    if (await checkProxyAlive(proxies[i])) return proxies[i];
+  }
+  return null; // none alive → caller goes direct
+}
+
+/**
+ * Fast liveness probe: HEAD https://accounts.google.com through the proxy.
+ * Treats HTTP 200/30x/403 as alive (any HTTP response means the tunnel works);
+ * network errors / 407 require a retry or direct fallback.
+ * @param {object} proxy
+ * @returns {Promise<boolean>}
+ */
+function checkProxyAlive(proxy) {
+  return new Promise((resolve) => {
+    const http = require("http");
+    const auth =
+      proxy.username && proxy.password
+        ? `${proxy.username}:${proxy.password}@`
+        : "";
+    const url = `http://${auth}${proxy.host}:${proxy.port}`;
+    const req = http.request(
+      url,
+      {
+        method: "HEAD",
+        path: "http://accounts.google.com/",
+        timeout: 6000,
+        // Send proxy auth directly if credentials exist (http.request handles
+        // the Proxy-Authorization header via the URL userinfo).
+        auth:
+          proxy.username && proxy.password
+            ? `${proxy.username}:${proxy.password}`
+            : undefined,
+      },
+      (res) => {
+        // 407/401 = proxy auth rejected (dead creds) → NOT alive.
+        const code = res.statusCode;
+        const ok = code !== undefined && code !== 407 && code !== 401 && code < 500;
+        res.resume();
+        resolve(ok);
+      }
+    );
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => resolve(false));
+    req.end();
+  });
+}
+
 // Build Chromium launch args for proxy. No auth in args (username/password
 // is attached via page.authenticate after launch — Puppeteer does not support
 // authenticated proxies in args across all builds).
@@ -102,5 +158,7 @@ module.exports = {
   parseProxyLine,
   loadProxies,
   getProxyForAccount,
+  pickLiveOrFirst,
+  checkProxyAlive,
   chromiumArgsForProxy,
 };

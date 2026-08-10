@@ -74,7 +74,26 @@ const REALISTIC_LAST_NAMES = [
  * @returns {Promise<{browser: import("puppeteer").Browser, page: import("puppeteer").Page}>}
  */
 async function launchStealthBrowser(config, services, options = {}) {
-  const proxy = options.proxy || (services.proxy && services.proxy.loadProxies()[0]);
+  // Proxy resolution: explicit options.proxy wins; otherwise auto-load from
+  // services.proxy ONLY if a proxy file exists with entries. If the proxy
+  // file is empty/missing → direct connection (dead/expired creds would
+  // break the initial navigation, e.g. Google OAuth login).
+  let proxy = options.proxy;
+  if (proxy === undefined && services.proxy) {
+    const pool =
+      typeof services.proxy.loadProxies === "function"
+        ? services.proxy.loadProxies()
+        : null;
+    if (pool && pool.length) {
+      // Prefer a live proxy; if none alive, use first anyway (may still work).
+      proxy =
+        typeof services.proxy.pickLiveOrFirst === "function"
+          ? await services.proxy.pickLiveOrFirst(pool)
+          : pool[0];
+    } else {
+      proxy = null; // empty proxy file → direct connection
+    }
+  }
   const fingerprint = options.fingerprint || (services.fingerprint && services.fingerprint.generateFingerprint());
 
   const launchArgs = [];

@@ -40,3 +40,6 @@ docs/superpowers/plans/2026-08-04-pateway-farm-wiring.md
 # Per-provider generated credentials + aliases inside accounts/
 /accounts/*/generated-accounts-*.json
 /accounts/*/aliases.txt
+
+# Account credentials pool — 650 GSuite accounts (sensitive, never commit)
+/accounts.json
